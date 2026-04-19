@@ -72,6 +72,16 @@ class RecordingStore(context: Context) : SQLiteOpenHelper(context, "holter.db", 
 
     // --- Sessions ---
 
+    /** Resolve session ID: if -1, return the latest session ID. */
+    private fun resolveSessionId(sessionId: Long): Long {
+        if (sessionId >= 0) return sessionId
+        val cursor = readableDatabase.rawQuery(
+            "SELECT id FROM sessions ORDER BY id DESC LIMIT 1", null)
+        cursor.use {
+            return if (it.moveToFirst()) it.getLong(0) else -1
+        }
+    }
+
     fun createSession(address: String): Long {
         val values = ContentValues().apply {
             put("address", address)
@@ -146,7 +156,8 @@ class RecordingStore(context: Context) : SQLiteOpenHelper(context, "holter.db", 
     }
 
     fun getRecentSamples(sessionId: Long, n: Int): List<Int> {
-        val all = readAllSamples(sessionId)
+        val resolved = resolveSessionId(sessionId)
+        val all = readAllSamples(resolved)
         return if (all.size > n) all.subList(all.size - n, all.size) else all
     }
 
@@ -166,10 +177,11 @@ class RecordingStore(context: Context) : SQLiteOpenHelper(context, "holter.db", 
     data class Event(val sampleIndex: Long, val timestamp: String, val tag: String, val text: String)
 
     fun getEvents(sessionId: Long): List<Event> {
+        val resolved = resolveSessionId(sessionId)
         val events = mutableListOf<Event>()
         val cursor = readableDatabase.query(
             "events", null,
-            "session_id=?", arrayOf(sessionId.toString()),
+            "session_id=?", arrayOf(resolved.toString()),
             null, null, "sample_index ASC"
         )
         cursor.use {
@@ -200,8 +212,9 @@ class RecordingStore(context: Context) : SQLiteOpenHelper(context, "holter.db", 
     // --- Export ---
 
     fun exportToXml(sessionId: Long): String {
+        val resolved = resolveSessionId(sessionId)
         val session = readableDatabase.query(
-            "sessions", null, "id=?", arrayOf(sessionId.toString()),
+            "sessions", null, "id=?", arrayOf(resolved.toString()),
             null, null, null
         )
         session.use { c ->
@@ -212,8 +225,8 @@ class RecordingStore(context: Context) : SQLiteOpenHelper(context, "holter.db", 
             val sampleCount = c.getLong(c.getColumnIndexOrThrow("sample_count"))
             val firmware = c.getString(c.getColumnIndexOrThrow("firmware")) ?: "unknown"
 
-            val events = getEvents(sessionId)
-            val samples = readAllSamples(sessionId)
+            val events = getEvents(resolved)
+            val samples = readAllSamples(resolved)
 
             val sb = StringBuilder()
             sb.appendLine("""<?xml version="1.0" encoding="UTF-8"?>""")
