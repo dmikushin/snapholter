@@ -217,7 +217,7 @@ class MainActivity : AppCompatActivity() {
             override fun run() {
                 holterService?.let { svc ->
                     hrText.text = "HR: ${if (svc.lastHr > 0) "${svc.lastHr}" else "--"}"
-                    batteryText.text = "Battery: ${if (svc.battery >= 0) "${svc.battery}%" else "--"}" +
+                    batteryText.text = "Battery: ${if (svc.battery >= 0) "${svc.battery}/3" else "--"}" +
                             if (svc.leadOff) " ⚠ LEAD OFF" else ""
 
                     val elapsed = if (svc.startTime > 0)

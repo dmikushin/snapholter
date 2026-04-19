@@ -111,14 +111,33 @@ class DeviceManager(private val context: Context) {
         setState(State.CONNECTING)
         scope.launch {
             try {
-                val sock = device!!.createRfcommSocketToServiceRecord(SPP)
-                sock.connect()
+                // Cancel discovery — it interferes with RFCOMM connections
+                try {
+                    val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+                    btManager.adapter?.cancelDiscovery()
+                } catch (e: SecurityException) {
+                    Log.w(TAG, "cancelDiscovery denied: ${e.message}")
+                }
+
+                val sock = try {
+                    val s = device!!.createRfcommSocketToServiceRecord(SPP)
+                    s.connect()
+                    s
+                } catch (e: IOException) {
+                    // Fallback: use reflection to connect on RFCOMM channel 1
+                    Log.w(TAG, "SPP UUID connect failed, trying channel 1 fallback")
+                    val s = device!!.javaClass
+                        .getMethod("createRfcommSocket", Int::class.java)
+                        .invoke(device, 1) as BluetoothSocket
+                    s.connect()
+                    s
+                }
                 socket = sock
                 disconnectedSince = 0
                 setState(State.CONNECTED)
                 Log.i(TAG, "Connected to $address")
                 startReader(sock.inputStream)
-            } catch (e: IOException) {
+            } catch (e: Exception) {
                 Log.w(TAG, "Connect failed: ${e.message}")
                 onConnectionLost()
             }
@@ -159,8 +178,25 @@ class DeviceManager(private val context: Context) {
 
                 // Try connecting
                 try {
-                    val sock = device!!.createRfcommSocketToServiceRecord(SPP)
-                    sock.connect()
+                    try {
+                        val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+                        btManager.adapter?.cancelDiscovery()
+                    } catch (e: SecurityException) {
+                        Log.w(TAG, "cancelDiscovery denied: ${e.message}")
+                    }
+
+                    val sock = try {
+                        val s = device!!.createRfcommSocketToServiceRecord(SPP)
+                        s.connect()
+                        s
+                    } catch (e: IOException) {
+                        Log.w(TAG, "Reconnect SPP UUID failed, trying channel 1 fallback")
+                        val s = device!!.javaClass
+                            .getMethod("createRfcommSocket", Int::class.java)
+                            .invoke(device, 1) as BluetoothSocket
+                        s.connect()
+                        s
+                    }
                     socket = sock
                     disconnectedSince = 0
                     setState(State.CONNECTED)
