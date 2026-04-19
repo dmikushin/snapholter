@@ -1,0 +1,21 @@
+#!/bin/sh
+# Gradle wrapper stub — downloads and runs Gradle
+# In Docker, Gradle is pre-installed. On dev machines, use Android Studio's Gradle.
+
+GRADLE_VERSION=8.5
+GRADLE_DIST_URL="https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
+GRADLE_HOME="${HOME}/.gradle/wrapper/dists/gradle-${GRADLE_VERSION}-bin"
+
+if command -v gradle >/dev/null 2>&1; then
+    exec gradle "$@"
+fi
+
+if [ ! -d "$GRADLE_HOME" ]; then
+    echo "Downloading Gradle ${GRADLE_VERSION}..."
+    mkdir -p "$GRADLE_HOME"
+    curl -sL "$GRADLE_DIST_URL" -o /tmp/gradle.zip
+    unzip -q /tmp/gradle.zip -d "$GRADLE_HOME"
+    rm /tmp/gradle.zip
+fi
+
+exec "$GRADLE_HOME/gradle-${GRADLE_VERSION}/bin/gradle" "$@"
