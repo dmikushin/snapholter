@@ -1,0 +1,16 @@
+[Unit]
+Description=SnapECG Holter Connector
+Documentation=https://github.com/dmikushin/snapecg-b10
+After=network-online.target bluetooth.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/forge/snapecg-b10/snapecg-connector/connector.py
+WorkingDirectory=%h/forge/snapecg-b10/snapecg-connector
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONPATH=%h/forge/snapecg-b10/src
+
+[Install]
+WantedBy=default.target
