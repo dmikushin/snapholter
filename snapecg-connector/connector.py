@@ -218,9 +218,9 @@ class HolterConnector:
             problems.append('Device not connected via Bluetooth')
 
         battery = checks.get('device_battery', -1)
-        min_battery = params.get('min_battery', 20)
+        min_battery = params.get('min_battery', 1)  # level 0-3; default min=1
         if 0 <= battery < min_battery:
-            problems.append(f'Device battery too low: {battery}% (minimum {min_battery}%)')
+            problems.append(f'Device battery too low: {battery}/3 (minimum {min_battery}/3)')
 
         if checks.get('lead_off'):
             problems.append('Electrodes not in contact (lead off)')
@@ -270,7 +270,7 @@ class HolterConnector:
         'holter_pair': ('Pair with Android app', {'address': 'IP address of the phone'}),
         'holter_get_status': ('Get device and recording status', {}),
         'holter_check_signal': ('Get ECG signal and analyze quality', {'seconds': 'Duration (default 10)'}),
-        'holter_verify_setup': ('Pre-recording verification (GO/NO-GO)', {'min_battery': 'Min battery % (default 20)'}),
+        'holter_verify_setup': ('Pre-recording verification (GO/NO-GO)', {'min_battery': 'Min battery level 0-3 (default 1)'}),
         'holter_start': ('Start Holter recording', {}),
         'holter_stop': ('Stop Holter recording', {}),
         'holter_add_event': ('Add event to patient diary', {'text': 'Event description', 'tag': 'Category tag'}),

@@ -137,7 +137,7 @@ class ConnectorProtocolTest {
                 put("go", false)
                 put("problems", org.json.JSONArray().apply {
                     put("Electrodes not in contact (lead off)")
-                    put("Device battery too low: 5%")
+                    put("Device battery too low: 0/3 (minimum 1/3)")
                 })
                 put("message", "2 issue(s) found.")
             })

@@ -8,6 +8,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import dev.snapecg.holter.bluetooth.DeviceManager
 import dev.snapecg.holter.ui.MainActivity
+import kotlinx.coroutines.*
 import java.io.*
 import java.text.SimpleDateFormat
 import java.util.*
@@ -56,6 +57,7 @@ class HolterService : Service(), DeviceManager.Listener {
     private val sampleBuffer = mutableListOf<Int>()
     private val flushHandler = Handler(Looper.getMainLooper())
     private val flushRunnable = Runnable { flushSamples() }
+    private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     // Binder for UI
     private val binder = LocalBinder()
@@ -123,10 +125,12 @@ class HolterService : Service(), DeviceManager.Listener {
         if (!isRecording) return
         isRecording = false
 
-        // Stop streaming
-        deviceManager?.stopStreaming()
-        Thread.sleep(100)
-        deviceManager?.disconnect()
+        // Stop streaming off main thread
+        serviceScope.launch {
+            deviceManager?.stopStreaming()
+            delay(100)
+            deviceManager?.disconnect()
+        }
 
         // Flush remaining samples
         flushSamples()
@@ -152,11 +156,15 @@ class HolterService : Service(), DeviceManager.Listener {
         btState = state
         when (state) {
             DeviceManager.State.CONNECTED -> {
-                deviceManager?.initialize()
-                Thread.sleep(300)
-                deviceManager?.startStreaming()
-                updateNotification("Recording...")
-                store?.logStatus(sessionId, "bt_connected")
+                serviceScope.launch {
+                    deviceManager?.initialize()
+                    delay(300)
+                    deviceManager?.startStreaming()
+                    withContext(Dispatchers.Main) {
+                        updateNotification("Recording...")
+                    }
+                    store?.logStatus(sessionId, "bt_connected")
+                }
             }
             DeviceManager.State.RECONNECTING -> {
                 updateNotification("Reconnecting...")
@@ -224,7 +232,7 @@ class HolterService : Service(), DeviceManager.Listener {
         val statusText = buildString {
             append(String.format("%dh %02dm", hours, mins))
             if (lastHr > 0) append(" | HR: $lastHr")
-            if (battery >= 0) append(" | Bat: $battery%")
+            if (battery >= 0) append(" | Bat: $battery/3")
             if (leadOff) append(" | ⚠ LEAD OFF")
         }
         updateNotification(statusText)
@@ -268,6 +276,7 @@ class HolterService : Service(), DeviceManager.Listener {
 
     override fun onDestroy() {
         if (isRecording) stopRecording()
+        serviceScope.cancel()
         super.onDestroy()
     }
 }
