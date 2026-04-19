@@ -3,7 +3,7 @@ package dev.snapecg.holter.bluetooth
 /**
  * SnapECG B10 protocol: packet encoding, decoding, stream parsing.
  *
- * Packet format: [0xFF] [LEN] [CMD/TYPE] [DATA...] [CHECKSUM]
+ * Packet format: 0xFF | LEN | CMD/TYPE | DATA | CHECKSUM
  *
  * Direct port of snapecg Python package protocol.py
  */

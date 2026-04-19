@@ -1,0 +1,6 @@
+.docker-build/
+.gradle/
+build/
+app/build/
+local.properties
+*.apk
