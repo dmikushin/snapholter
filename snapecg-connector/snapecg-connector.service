@@ -6,11 +6,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/forge/snapecg-b10/snapecg-connector/connector.py
-WorkingDirectory=%h/forge/snapecg-b10/snapecg-connector
+ExecStart=%h/forge/snapholter/snapecg-connector/connector.py
+WorkingDirectory=%h/forge/snapholter/snapecg-connector
 Restart=on-failure
 RestartSec=5
-Environment=PYTHONPATH=%h/forge/snapecg-b10/src
+Environment=PYTHONPATH=%h/forge/snapholter/src
 
 [Install]
 WantedBy=default.target
