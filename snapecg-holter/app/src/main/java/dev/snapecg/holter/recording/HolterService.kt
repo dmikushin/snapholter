@@ -195,6 +195,7 @@ class HolterService : Service(), DeviceManager.Listener {
     override fun onAnswerReceived(code: Int) {}
 
     override fun onConnectionLostTooLong(seconds: Int) {
+        if (!isRecording) return
         updateNotification("⚠ BT lost ${seconds}s! Move closer to device.")
         // Vibrate alert
         val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
