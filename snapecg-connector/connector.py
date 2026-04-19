@@ -41,11 +41,62 @@ class HolterConnector:
 
     # --- Discovery ---
 
-    async def discover(self, timeout: float = 10.0) -> list[dict]:
-        """Find Android apps on local network."""
-        devices = await self.discovery.listen(duration=timeout)
-        return [{'name': d.name, 'address': d.address, 'port': d.port,
-                 'version': d.version} for d in devices]
+    async def discover(self, timeout: float = 5.0) -> list[dict]:
+        """Find Android apps on local network by scanning subnet for port 8365."""
+        import ipaddress
+        import asyncio
+
+        # Get local IP and subnet
+        import subprocess
+        result = subprocess.run(['ip', '-4', 'route', 'show', 'default'],
+                                capture_output=True, text=True)
+        # Find local network interface IP
+        iface_result = subprocess.run(['ip', '-4', 'addr', 'show'],
+                                      capture_output=True, text=True)
+        local_ips = []
+        for line in iface_result.stdout.split('\n'):
+            line = line.strip()
+            if line.startswith('inet ') and '127.0.0.' not in line:
+                parts = line.split()
+                local_ips.append(parts[1])  # e.g. "192.168.1.123/24"
+
+        devices = []
+        for cidr in local_ips:
+            try:
+                network = ipaddress.ip_network(cidr, strict=False)
+            except ValueError:
+                continue
+
+            # Skip large subnets
+            if network.num_addresses > 1024:
+                continue
+
+            async def probe(ip):
+                try:
+                    _, writer = await asyncio.wait_for(
+                        asyncio.open_connection(str(ip), CONNECTOR_PORT),
+                        timeout=0.5
+                    )
+                    writer.close()
+                    await writer.wait_closed()
+                    return str(ip)
+                except (asyncio.TimeoutError, OSError):
+                    return None
+
+            # Scan all hosts in parallel
+            tasks = [probe(ip) for ip in network.hosts()]
+            results = await asyncio.gather(*tasks)
+            my_ip = cidr.split('/')[0]
+            for ip in results:
+                if ip and ip != my_ip:
+                    devices.append({
+                        'name': ip,
+                        'address': ip,
+                        'port': CONNECTOR_PORT,
+                        'version': '?',
+                    })
+
+        return devices
 
     # --- Pairing ---
 

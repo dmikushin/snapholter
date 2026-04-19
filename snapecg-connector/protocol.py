@@ -159,6 +159,7 @@ class AppConnection:
     async def connect(self):
         """Establish TCP connection to the app."""
         self.reader, self.writer = await asyncio.open_connection(self.address, self.port)
+        await asyncio.sleep(0.5)  # let server set up DataInputStream
 
     async def disconnect(self):
         """Close connection."""
