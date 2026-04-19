@@ -1,7 +1,10 @@
 package dev.snapecg.holter.connector
 
 import android.app.Service
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
 import android.os.Binder
 import android.os.IBinder
 import android.util.Log
@@ -35,9 +38,30 @@ class ConnectorService : Service() {
     private var paired = false
     private var pairingCode: String? = null
 
-    // Reference to HolterService (set by MainActivity)
+    // Reference to HolterService (set by MainActivity or self-bound)
     var holterService: HolterService? = null
     var store: RecordingStore? = null
+    private var holterBound = false
+
+    private val holterConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val binder = service as? HolterService.LocalBinder
+            holterService = binder?.getService()
+            holterBound = true
+            Log.i(TAG, "Bound to HolterService")
+        }
+        override fun onServiceDisconnected(name: ComponentName?) {
+            holterService = null
+            holterBound = false
+            Log.w(TAG, "HolterService disconnected")
+        }
+    }
+
+    private fun bindToHolterService() {
+        if (holterBound) return
+        val intent = Intent(this, HolterService::class.java)
+        bindService(intent, holterConnection, Context.BIND_AUTO_CREATE)
+    }
 
     private val binder = LocalBinder()
     inner class LocalBinder : Binder() {
@@ -56,6 +80,10 @@ class ConnectorService : Service() {
 
     override fun onDestroy() {
         scope.cancel()
+        if (holterBound) {
+            unbindService(holterConnection)
+            holterBound = false
+        }
         serverSocket?.close()
         clientSocket?.close()
         super.onDestroy()
@@ -236,6 +264,8 @@ class ConnectorService : Service() {
             putExtra(HolterService.EXTRA_ADDRESS, "34:81:F4:1C:3F:C1") // TODO: from params
         }
         startForegroundService(intent)
+        // Bind so we can query status later
+        bindToHolterService()
         return JSONObject().put("status", "starting")
     }
 
