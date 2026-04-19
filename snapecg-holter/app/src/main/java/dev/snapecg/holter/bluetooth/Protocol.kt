@@ -125,6 +125,8 @@ class StreamParser {
 
     data class Packet(val type: Int, val raw: ByteArray, val offset: Int)
 
+    fun reset() { buffer.clear() }
+
     fun feed(data: ByteArray, length: Int = data.size): List<Packet> {
         for (i in 0 until length) buffer.add(data[i])
         val packets = mutableListOf<Packet>()

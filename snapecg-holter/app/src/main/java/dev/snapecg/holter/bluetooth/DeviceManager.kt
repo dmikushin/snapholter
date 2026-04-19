@@ -26,8 +26,8 @@ class DeviceManager(private val context: Context) {
     companion object {
         private const val TAG = "DeviceManager"
         private val SPP = UUID.fromString(Protocol.SPP_UUID)
-        private const val RECONNECT_INITIAL_MS = 5000L
-        private const val RECONNECT_MAX_MS = 30000L
+        private const val RECONNECT_INITIAL_MS = 2000L
+        private const val RECONNECT_MAX_MS = 15000L
         private const val RECONNECT_ALERT_MS = 30000L // alert after 30s disconnected
     }
 
@@ -107,33 +107,66 @@ class DeviceManager(private val context: Context) {
 
     // --- Connection ---
 
+    /**
+     * Try connecting via SPP UUID, then insecure SPP UUID, then RFCOMM channel 1.
+     * Properly closes failed sockets before trying next method.
+     */
+    private fun tryConnect(): BluetoothSocket {
+        try {
+            val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+            btManager.adapter?.cancelDiscovery()
+        } catch (_: SecurityException) {}
+
+        // Method 1: standard SPP
+        try {
+            val s = device!!.createRfcommSocketToServiceRecord(SPP)
+            try {
+                s.connect()
+                return s
+            } catch (e: IOException) {
+                try { s.close() } catch (_: IOException) {}
+                Log.w(TAG, "SPP UUID failed: ${e.message}")
+            }
+        } catch (e: IOException) {
+            Log.w(TAG, "createRfcommSocket failed: ${e.message}")
+        }
+
+        // Method 2: insecure SPP
+        try {
+            val s = device!!.createInsecureRfcommSocketToServiceRecord(SPP)
+            try {
+                s.connect()
+                return s
+            } catch (e: IOException) {
+                try { s.close() } catch (_: IOException) {}
+                Log.w(TAG, "Insecure SPP failed: ${e.message}")
+            }
+        } catch (e: IOException) {
+            Log.w(TAG, "createInsecureRfcommSocket failed: ${e.message}")
+        }
+
+        // Method 3: reflection channel 1
+        Log.w(TAG, "Trying RFCOMM channel 1 fallback")
+        val s = device!!.javaClass
+            .getMethod("createRfcommSocket", Int::class.java)
+            .invoke(device, 1) as BluetoothSocket
+        try {
+            s.connect()
+            return s
+        } catch (e: IOException) {
+            try { s.close() } catch (_: IOException) {}
+            throw e
+        }
+    }
+
     private fun doConnect() {
         setState(State.CONNECTING)
         scope.launch {
             try {
-                // Cancel discovery — it interferes with RFCOMM connections
-                try {
-                    val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-                    btManager.adapter?.cancelDiscovery()
-                } catch (e: SecurityException) {
-                    Log.w(TAG, "cancelDiscovery denied: ${e.message}")
-                }
-
-                val sock = try {
-                    val s = device!!.createRfcommSocketToServiceRecord(SPP)
-                    s.connect()
-                    s
-                } catch (e: IOException) {
-                    // Fallback: use reflection to connect on RFCOMM channel 1
-                    Log.w(TAG, "SPP UUID connect failed, trying channel 1 fallback")
-                    val s = device!!.javaClass
-                        .getMethod("createRfcommSocket", Int::class.java)
-                        .invoke(device, 1) as BluetoothSocket
-                    s.connect()
-                    s
-                }
+                val sock = tryConnect()
                 socket = sock
                 disconnectedSince = 0
+                parser.reset()
                 setState(State.CONNECTED)
                 Log.i(TAG, "Connected to $address")
                 startReader(sock.inputStream)
@@ -163,10 +196,10 @@ class DeviceManager(private val context: Context) {
     private fun scheduleReconnect() {
         reconnectJob?.cancel()
         reconnectJob = scope.launch {
-            var delay = RECONNECT_INITIAL_MS
+            var delayMs = RECONNECT_INITIAL_MS
             while (shouldReconnect && state != State.CONNECTED) {
-                Log.i(TAG, "Reconnecting in ${delay}ms...")
-                delay(delay)
+                Log.i(TAG, "Reconnecting in ${delayMs}ms...")
+                delay(delayMs)
 
                 // Alert if disconnected too long
                 val elapsed = System.currentTimeMillis() - disconnectedSince
@@ -176,36 +209,18 @@ class DeviceManager(private val context: Context) {
                     }
                 }
 
-                // Try connecting
                 try {
-                    try {
-                        val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-                        btManager.adapter?.cancelDiscovery()
-                    } catch (e: SecurityException) {
-                        Log.w(TAG, "cancelDiscovery denied: ${e.message}")
-                    }
-
-                    val sock = try {
-                        val s = device!!.createRfcommSocketToServiceRecord(SPP)
-                        s.connect()
-                        s
-                    } catch (e: IOException) {
-                        Log.w(TAG, "Reconnect SPP UUID failed, trying channel 1 fallback")
-                        val s = device!!.javaClass
-                            .getMethod("createRfcommSocket", Int::class.java)
-                            .invoke(device, 1) as BluetoothSocket
-                        s.connect()
-                        s
-                    }
+                    val sock = tryConnect()
                     socket = sock
                     disconnectedSince = 0
+                    parser.reset()
                     setState(State.CONNECTED)
                     Log.i(TAG, "Reconnected to $address")
                     startReader(sock.inputStream)
                     return@launch
-                } catch (e: IOException) {
+                } catch (e: Exception) {
                     Log.w(TAG, "Reconnect failed: ${e.message}")
-                    delay = (delay * 2).coerceAtMost(RECONNECT_MAX_MS)
+                    delayMs = (delayMs * 2).coerceAtMost(RECONNECT_MAX_MS)
                 }
             }
         }
