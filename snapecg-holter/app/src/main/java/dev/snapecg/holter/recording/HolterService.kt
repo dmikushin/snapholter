@@ -7,6 +7,7 @@ import android.os.*
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import dev.snapecg.holter.bluetooth.DeviceManager
+import dev.snapecg.holter.bluetooth.QRSDetector
 import dev.snapecg.holter.ui.MainActivity
 import kotlinx.coroutines.*
 import java.io.*
@@ -44,6 +45,7 @@ class HolterService : Service(), DeviceManager.Listener {
     private var wakeLock: PowerManager.WakeLock? = null
     private var store: RecordingStore? = null
     private var sessionId: Long = -1
+    private val qrsDetector = QRSDetector()
 
     // Live stats
     var isRecording = false; private set
@@ -224,6 +226,10 @@ class HolterService : Service(), DeviceManager.Listener {
         }
         sampleCount++
         this.leadOff = leadOff
+
+        // QRS detection — sample is baseline-subtracted, restore ADC baseline
+        val hr = qrsDetector.process(sample + 2048)
+        if (hr > 0) lastHr = hr
     }
 
     override fun onBattery(level: Int) {
