@@ -29,18 +29,16 @@ class ConnectorService : Service() {
     companion object {
         private const val TAG = "ConnectorService"
         private const val PORT = 8365
-        private const val BROADCAST_INTERVAL_MS = 2000L
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private var serverSocket: ServerSocket? = null
     private var clientSocket: Socket? = null
     private var paired = false
     private var pairingCode: String? = null
 
-    // Observable connector state
+    // Observable connector state (based on port scan discovery)
     var isConnectorConnected = false; private set
-    var connectorListener: (() -> Unit)? = null
+    var connectorAddress: String? = null; private set
 
     // Reference to HolterService (set by MainActivity or self-bound)
     var holterService: HolterService? = null
@@ -77,9 +75,8 @@ class ConnectorService : Service() {
     override fun onCreate() {
         super.onCreate()
         store = RecordingStore(this)
-        scope.launch { startBroadcast() }
-        scope.launch { startServer() }
-        Log.i(TAG, "ConnectorService started on port $PORT")
+        scope.launch { scanForConnector() }
+        Log.i(TAG, "ConnectorService started, scanning for connector")
     }
 
     override fun onDestroy() {
@@ -88,85 +85,127 @@ class ConnectorService : Service() {
             unbindService(holterConnection)
             holterBound = false
         }
-        serverSocket?.close()
         clientSocket?.close()
         super.onDestroy()
     }
 
-    // --- UDP Discovery ---
+    // --- Connector Discovery (port scan) ---
 
-    private suspend fun startBroadcast() {
-        val socket = DatagramSocket()
-        socket.broadcast = true
-        val msg = JSONObject().apply {
-            put("type", "snapecg_holter")
-            put("name", android.os.Build.MODEL)
-            put("port", PORT)
-            put("version", "1.0")
-        }.toString().toByteArray()
-
+    private suspend fun scanForConnector() {
         while (scope.isActive) {
             try {
-                val packet = DatagramPacket(msg, msg.size,
-                    InetAddress.getByName("255.255.255.255"), PORT)
-                socket.send(packet)
+                if (clientSocket != null && clientSocket?.isConnected == true) {
+                    // Already connected — just check it's alive
+                    delay(5000)
+                    continue
+                }
+
+                val localIp = getLocalIp()
+                if (localIp == null) {
+                    Log.w(TAG, "Cannot determine local IP, retrying...")
+                    delay(5000)
+                    continue
+                }
+                val prefix = localIp.substringBeforeLast('.')
+                Log.d(TAG, "Scanning $prefix.* for connector (local=$localIp)")
+                val found = scanSubnet(prefix, localIp)
+                if (found != null) {
+                    Log.i(TAG, "Connector found at $found, connecting...")
+                    connectorAddress = found
+                    isConnectorConnected = true
+                    connectToConnector(found)
+                } else {
+                    if (isConnectorConnected) {
+                        Log.i(TAG, "Connector lost")
+                    }
+                    isConnectorConnected = false
+                    connectorAddress = null
+                }
             } catch (e: Exception) {
-                Log.w(TAG, "Broadcast failed: ${e.message}")
+                Log.w(TAG, "Discovery error: ${e.message}")
+                isConnectorConnected = false
+                connectorAddress = null
             }
-            delay(BROADCAST_INTERVAL_MS)
+            delay(5000)
         }
-        socket.close()
     }
 
-    // --- TCP Server ---
-
-    private suspend fun startServer() {
-        serverSocket = ServerSocket(PORT)
-        while (scope.isActive) {
-            try {
-                val client = serverSocket!!.accept()
-                Log.i(TAG, "Connector connected from ${client.inetAddress}")
-                clientSocket = client
-                handleClient(client)
-            } catch (e: Exception) {
-                if (scope.isActive) Log.w(TAG, "Server error: ${e.message}")
-            }
+    private suspend fun connectToConnector(address: String) {
+        try {
+            val socket = Socket()
+            socket.connect(InetSocketAddress(address, PORT), 3000)
+            clientSocket = socket
+            Log.i(TAG, "Connected to connector at $address:$PORT")
+            handleConnectorSession(socket)
+        } catch (e: Exception) {
+            Log.w(TAG, "Connection to connector failed: ${e.message}")
+            isConnectorConnected = false
+            clientSocket = null
         }
     }
 
-    private suspend fun handleClient(socket: Socket) {
+    private suspend fun handleConnectorSession(socket: Socket) {
         val input = DataInputStream(socket.getInputStream())
         val output = DataOutputStream(socket.getOutputStream())
-        isConnectorConnected = true
-        connectorListener?.invoke()
 
         try {
             while (scope.isActive && socket.isConnected) {
-                // Read length-prefixed JSON
                 val length = input.readInt()
                 if (length <= 0 || length > 10 * 1024 * 1024) break
                 val payload = ByteArray(length)
                 input.readFully(payload)
                 val request = JSONObject(String(payload))
 
-                // Handle request
                 val response = handleRequest(request)
 
-                // Send response
                 val respBytes = response.toString().toByteArray()
                 output.writeInt(respBytes.size)
                 output.write(respBytes)
                 output.flush()
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Client disconnected: ${e.message}")
+            Log.w(TAG, "Connector session ended: ${e.message}")
         } finally {
             socket.close()
             clientSocket = null
-            paired = false
             isConnectorConnected = false
-            connectorListener?.invoke()
+            Log.i(TAG, "Disconnected from connector")
         }
+    }
+
+    private suspend fun scanSubnet(prefix: String, localIp: String): String? {
+        val jobs = (1..254).mapNotNull { i ->
+            val ip = "$prefix.$i"
+            if (ip == localIp) return@mapNotNull null
+            scope.async {
+                try {
+                    val sock = Socket()
+                    sock.connect(InetSocketAddress(ip, PORT), 500)
+                    sock.close()
+                    ip
+                } catch (_: Exception) {
+                    null
+                }
+            }
+        }
+        val results = jobs.awaitAll()
+        return results.filterNotNull().firstOrNull()
+    }
+
+    private fun getLocalIp(): String? {
+        try {
+            for (iface in java.net.NetworkInterface.getNetworkInterfaces()) {
+                if (iface.isLoopback || !iface.isUp) continue
+                for (addr in iface.inetAddresses) {
+                    if (addr is java.net.Inet4Address && !addr.isLoopbackAddress) {
+                        return addr.hostAddress
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "getLocalIp failed: ${e.message}")
+        }
+        return null
     }
 
     // --- Request handler ---
