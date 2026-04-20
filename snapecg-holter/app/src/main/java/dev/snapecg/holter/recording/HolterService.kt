@@ -32,6 +32,8 @@ class HolterService : Service(), DeviceManager.Listener {
 
         const val ACTION_START = "dev.snapecg.holter.START"
         const val ACTION_STOP = "dev.snapecg.holter.STOP"
+        const val ACTION_CONNECT = "dev.snapecg.holter.CONNECT"
+        const val ACTION_DISCONNECT = "dev.snapecg.holter.DISCONNECT"
         const val ACTION_ADD_EVENT = "dev.snapecg.holter.ADD_EVENT"
         const val EXTRA_ADDRESS = "address"
         const val EXTRA_EVENT_TEXT = "event_text"
@@ -76,6 +78,13 @@ class HolterService : Service(), DeviceManager.Listener {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
+            ACTION_CONNECT -> {
+                val address = intent.getStringExtra(EXTRA_ADDRESS) ?: return START_STICKY
+                connectOnly(address)
+            }
+            ACTION_DISCONNECT -> {
+                disconnectOnly()
+            }
             ACTION_START -> {
                 val address = intent.getStringExtra(EXTRA_ADDRESS) ?: return START_STICKY
                 startRecording(address)
@@ -88,6 +97,27 @@ class HolterService : Service(), DeviceManager.Listener {
             }
         }
         return START_STICKY
+    }
+
+    // --- BT connect without recording ---
+
+    private fun connectOnly(address: String) {
+        if (deviceManager != null) return // already connected or connecting
+        startForeground(NOTIFICATION_ID, buildNotification("Connecting..."))
+        deviceManager = DeviceManager(this).apply {
+            listener = this@HolterService
+            connect(address)
+        }
+        Log.i(TAG, "Connecting to $address (no recording)")
+    }
+
+    private fun disconnectOnly() {
+        if (isRecording) return // use ACTION_STOP instead
+        deviceManager?.disconnect()
+        deviceManager = null
+        btState = DeviceManager.State.DISCONNECTED
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     // --- Recording lifecycle ---
@@ -109,10 +139,23 @@ class HolterService : Service(), DeviceManager.Listener {
         sampleCount = 0
         isRecording = true
 
-        // Connect to device
-        deviceManager = DeviceManager(this).apply {
-            listener = this@HolterService
-            connect(address)
+        // Connect to device (or reuse existing connection)
+        if (deviceManager == null) {
+            deviceManager = DeviceManager(this).apply {
+                listener = this@HolterService
+                connect(address)
+            }
+        } else if (btState == DeviceManager.State.CONNECTED) {
+            // Already connected from CONNECT phase — start streaming
+            serviceScope.launch {
+                deviceManager?.initialize()
+                delay(300)
+                deviceManager?.startStreaming()
+                withContext(Dispatchers.Main) {
+                    updateNotification("Recording...")
+                }
+                store?.logStatus(sessionId, "bt_connected")
+            }
         }
 
         // Start periodic flush

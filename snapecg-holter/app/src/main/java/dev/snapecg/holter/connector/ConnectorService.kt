@@ -38,6 +38,10 @@ class ConnectorService : Service() {
     private var paired = false
     private var pairingCode: String? = null
 
+    // Observable connector state
+    var isConnectorConnected = false; private set
+    var connectorListener: (() -> Unit)? = null
+
     // Reference to HolterService (set by MainActivity or self-bound)
     var holterService: HolterService? = null
     var store: RecordingStore? = null
@@ -133,6 +137,8 @@ class ConnectorService : Service() {
     private suspend fun handleClient(socket: Socket) {
         val input = DataInputStream(socket.getInputStream())
         val output = DataOutputStream(socket.getOutputStream())
+        isConnectorConnected = true
+        connectorListener?.invoke()
 
         try {
             while (scope.isActive && socket.isConnected) {
@@ -158,6 +164,8 @@ class ConnectorService : Service() {
             socket.close()
             clientSocket = null
             paired = false
+            isConnectorConnected = false
+            connectorListener?.invoke()
         }
     }
 
