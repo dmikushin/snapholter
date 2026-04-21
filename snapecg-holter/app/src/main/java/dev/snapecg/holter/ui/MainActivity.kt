@@ -229,10 +229,8 @@ class MainActivity : AppCompatActivity() {
                 statusMessage.text = "Portable ECG monitoring"
                 primaryButton.text = "Start Holter Session"
                 primaryButton.setOnClickListener {
-                    startService(Intent(this, ConnectorService::class.java))
-                    bindService(Intent(this, ConnectorService::class.java),
-                        connectorConnection, BIND_AUTO_CREATE)
-                    setState(UiState.SCANNING_CONNECTOR)
+                    connectDevice()
+                    setState(UiState.SCANNING_DEVICE)
                 }
                 secondaryButton.visibility = View.VISIBLE
                 secondaryButton.text = "Open Recordings"
@@ -241,10 +239,13 @@ class MainActivity : AppCompatActivity() {
             UiState.SCANNING_CONNECTOR -> {
                 statusIcon.text = "\uD83D\uDD0C" // plug
                 spinner.visibility = View.VISIBLE
-                statusTitle.text = "Searching for connector..."
+                statusTitle.text = "Searching for AI assistant..."
                 statusMessage.text = "Start snapecg-connector on your PC\nand make sure you are on the same network."
-                primaryButton.text = "Cancel"
-                primaryButton.setOnClickListener { setState(UiState.HOME) }
+                primaryButton.text = "Skip"
+                primaryButton.setOnClickListener {
+                    aiCheckbox.isChecked = false
+                    onStartRecording()
+                }
             }
             UiState.SCANNING_DEVICE -> {
                 statusIcon.text = "\uD83D\uDCF6" // signal
@@ -254,7 +255,7 @@ class MainActivity : AppCompatActivity() {
                 primaryButton.text = "Cancel"
                 primaryButton.setOnClickListener {
                     disconnectDevice()
-                    setState(UiState.SCANNING_CONNECTOR)
+                    setState(UiState.HOME)
                 }
             }
             UiState.DEVICE_READY -> {
@@ -321,6 +322,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onStartRecording() {
+        // If AI assistance requested, ensure connector is available
+        if (aiCheckbox.isChecked && connectorService?.isConnectorConnected != true) {
+            // Start connector service and search
+            startService(Intent(this, ConnectorService::class.java))
+            bindService(Intent(this, ConnectorService::class.java),
+                connectorConnection, BIND_AUTO_CREATE)
+            setState(UiState.SCANNING_CONNECTOR)
+            return
+        }
+
         val intent = Intent(this, HolterService::class.java).apply {
             action = HolterService.ACTION_START
             putExtra(HolterService.EXTRA_ADDRESS, BT_ADDRESS)
@@ -416,27 +427,17 @@ class MainActivity : AppCompatActivity() {
         when (state) {
             UiState.HOME -> { /* static */ }
             UiState.SCANNING_CONNECTOR -> {
+                // Waiting for connector (AI assistance requested)
                 if (connectorService?.isConnectorConnected == true) {
-                    connectDevice()
-                    setState(UiState.SCANNING_DEVICE)
+                    onStartRecording() // now connector is ready, proceed
                 }
             }
             UiState.SCANNING_DEVICE -> {
-                if (connectorService?.isConnectorConnected != true) {
-                    disconnectDevice()
-                    setState(UiState.HOME)
-                    return
-                }
                 if (holterService?.btState == DeviceManager.State.CONNECTED) {
                     setState(UiState.DEVICE_READY)
                 }
             }
             UiState.DEVICE_READY -> {
-                if (connectorService?.isConnectorConnected != true) {
-                    disconnectDevice()
-                    setState(UiState.HOME)
-                    return
-                }
                 if (holterService?.btState != DeviceManager.State.CONNECTED) {
                     setState(UiState.SCANNING_DEVICE)
                 }
