@@ -10,6 +10,7 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.widget.*
+import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -42,6 +43,7 @@ class MainActivity : AppCompatActivity() {
     // Saved stats for COMPLETED screen
     private var finalSamples = 0L
     private var finalDuration = 0L
+    private var savedFileName: String? = null
 
     // --- UI elements ---
     private lateinit var spinner: ProgressBar
@@ -57,6 +59,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btStateText: TextView
 
     private lateinit var aiCheckbox: CheckBox
+    private lateinit var patientNameInput: EditText
     private lateinit var primaryButton: Button
     private lateinit var secondaryButton: Button
 
@@ -157,6 +160,18 @@ class MainActivity : AppCompatActivity() {
 
         root.addView(statsContainer)
 
+        // Patient name input (DEVICE_READY only)
+        patientNameInput = EditText(this).apply {
+            hint = "Patient name (optional)"
+            textSize = 16f
+            visibility = View.GONE
+            isSingleLine = true
+        }
+        root.addView(patientNameInput, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(24) })
+
         // AI checkbox (DEVICE_READY only)
         aiCheckbox = CheckBox(this).apply {
             text = "Verify initial data with AI agent"
@@ -207,6 +222,7 @@ class MainActivity : AppCompatActivity() {
         spinner.visibility = View.GONE
         statsContainer.visibility = View.GONE
         aiCheckbox.visibility = View.GONE
+        patientNameInput.visibility = View.GONE
         primaryButton.visibility = View.VISIBLE
         secondaryButton.visibility = View.GONE
 
@@ -234,6 +250,7 @@ class MainActivity : AppCompatActivity() {
                 statusIcon.text = "\u2705" // checkmark
                 statusTitle.text = "Device connected"
                 statusMessage.text = "Wear the device comfortably,\nattach electrodes, and press Start."
+                patientNameInput.visibility = View.VISIBLE
                 aiCheckbox.visibility = View.VISIBLE
                 primaryButton.text = "Start Recording"
                 primaryButton.setOnClickListener { onStartRecording() }
@@ -257,7 +274,8 @@ class MainActivity : AppCompatActivity() {
                 statusTitle.text = "Recording complete"
                 val mins = finalDuration / 60
                 val secs = finalDuration % 60
-                statusMessage.text = "${finalSamples} samples, ${mins}m ${secs}s"
+                val fileInfo = if (savedFileName != null) "\nSaved: $savedFileName" else ""
+                statusMessage.text = "${finalSamples} samples, ${mins}m ${secs}s$fileInfo"
                 primaryButton.text = "Share Recording"
                 primaryButton.setOnClickListener { onShare() }
                 secondaryButton.visibility = View.VISIBLE
@@ -314,19 +332,45 @@ class MainActivity : AppCompatActivity() {
             action = HolterService.ACTION_STOP
         }
         startService(intent)
-        setState(UiState.COMPLETED)
+
+        // Export to EDF in background
+        val patientName = patientNameInput.text.toString().trim()
+        Thread {
+            val store = RecordingStore(this)
+            val fileName = store.exportToEdf(this, -1, patientName)
+            runOnUiThread {
+                savedFileName = fileName
+                setState(UiState.COMPLETED)
+            }
+        }.start()
     }
 
     private fun onShare() {
-        val store = RecordingStore(this)
-        val xml = store.exportToXml(-1)
-        val file = java.io.File(cacheDir, "holter_recording.xml")
-        file.writeText(xml)
-
-        val uri = androidx.core.content.FileProvider.getUriForFile(
-            this, "$packageName.fileprovider", file)
+        val fileName = savedFileName
+        if (fileName == null) {
+            Toast.makeText(this, "No recording to share", Toast.LENGTH_SHORT).show()
+            return
+        }
+        // Find the file in MediaStore
+        val collection = android.provider.MediaStore.Files.getContentUri("external")
+        val cursor = contentResolver.query(
+            collection,
+            arrayOf(android.provider.MediaStore.MediaColumns._ID),
+            "${android.provider.MediaStore.MediaColumns.DISPLAY_NAME}=?",
+            arrayOf(fileName), null
+        )
+        val uri = cursor?.use {
+            if (it.moveToFirst()) {
+                val id = it.getLong(0)
+                android.content.ContentUris.withAppendedId(collection, id)
+            } else null
+        }
+        if (uri == null) {
+            Toast.makeText(this, "File not found", Toast.LENGTH_SHORT).show()
+            return
+        }
         val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "application/xml"
+            type = "application/octet-stream"
             putExtra(Intent.EXTRA_STREAM, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }

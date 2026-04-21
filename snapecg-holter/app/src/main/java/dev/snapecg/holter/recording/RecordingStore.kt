@@ -260,4 +260,84 @@ class RecordingStore(context: Context) : SQLiteOpenHelper(context, "holter.db", 
             return sb.toString()
         }
     }
+
+    /**
+     * Export a session to EDF file, save to Documents/SnapECG/ via MediaStore.
+     * Returns the display name of the saved file, or null on failure.
+     */
+    fun exportToEdf(context: Context, sessionId: Long, patientName: String = ""): String? {
+        val resolved = resolveSessionId(sessionId)
+
+        val cursor = readableDatabase.query(
+            "sessions", null, "id=?", arrayOf(resolved.toString()),
+            null, null, null
+        )
+        cursor.use { c ->
+            if (!c.moveToFirst()) return null
+
+            val startTimeStr = c.getString(c.getColumnIndexOrThrow("start_time"))
+            val sampleCount = c.getLong(c.getColumnIndexOrThrow("sample_count"))
+
+            val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US)
+            val startDate = try { sdf.parse(startTimeStr.substringBefore('.').substringBefore('+')) } catch (_: Exception) { Date() }
+            val durationMin = (sampleCount / 200 / 60).toInt()
+
+            // Build filename
+            val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(startDate!!)
+            val namePart = if (patientName.isNotBlank()) "_${sanitize(patientName)}" else ""
+            val displayName = "snapecg${namePart}_${ts}_${durationMin}m.edf"
+
+            // Save to Documents/SnapECG/ via MediaStore
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+                put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream")
+                put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, "Documents/SnapECG")
+            }
+            val uri = context.contentResolver.insert(
+                android.provider.MediaStore.Files.getContentUri("external"), values
+            ) ?: return null
+
+            val output = context.contentResolver.openOutputStream(uri) ?: return null
+
+            val totalSeconds = (sampleCount / 200).toInt()
+            val writer = EdfWriter(output, patientName, startDate, 200)
+            writer.writeHeader(totalSeconds)
+
+            // Stream chunks as 1-second data records
+            val chunkCursor = readableDatabase.query(
+                "ecg_chunks", arrayOf("samples"),
+                "session_id=?", arrayOf(resolved.toString()),
+                null, null, "chunk_index ASC"
+            )
+
+            val sampleBuf = mutableListOf<Int>()
+            chunkCursor.use { cc ->
+                while (cc.moveToNext()) {
+                    val blob = cc.getBlob(0)
+                    for (i in 0 until blob.size / 2) {
+                        val lo = blob[i * 2].toInt() and 0xFF
+                        val hi = blob[i * 2 + 1].toInt()
+                        sampleBuf.add((hi shl 8) or lo)
+                    }
+                    // Flush complete 1-second records
+                    while (sampleBuf.size >= 200) {
+                        val record = IntArray(200) { sampleBuf.removeAt(0) }
+                        writer.writeDataRecord(record)
+                    }
+                }
+            }
+            // Pad remaining samples to a full record
+            if (sampleBuf.isNotEmpty()) {
+                while (sampleBuf.size < 200) sampleBuf.add(0)
+                writer.writeDataRecord(IntArray(200) { sampleBuf[it] })
+            }
+
+            writer.close()
+            return displayName
+        }
+    }
+
+    private fun sanitize(name: String): String {
+        return name.trim().replace(Regex("[^a-zA-Z0-9_-]"), "_").take(30)
+    }
 }
