@@ -105,7 +105,6 @@ class HolterService : Service(), DeviceManager.Listener {
 
     private fun connectOnly(address: String) {
         if (deviceManager != null) return // already connected or connecting
-        startForeground(NOTIFICATION_ID, buildNotification("Connecting..."))
         deviceManager = DeviceManager(this).apply {
             listener = this@HolterService
             connect(address)

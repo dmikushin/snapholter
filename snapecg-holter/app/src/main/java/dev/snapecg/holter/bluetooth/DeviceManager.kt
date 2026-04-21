@@ -45,6 +45,7 @@ class DeviceManager(private val context: Context) {
 
     var listener: Listener? = null
     var state: State = State.DISCONNECTED; private set
+    private var hasConnectedOnce = false
 
     private var socket: BluetoothSocket? = null
     private var device: BluetoothDevice? = null
@@ -167,6 +168,7 @@ class DeviceManager(private val context: Context) {
                 socket = sock
                 disconnectedSince = 0
                 parser.reset()
+                hasConnectedOnce = true
                 setState(State.CONNECTED)
                 Log.i(TAG, "Connected to $address")
                 startReader(sock.inputStream)
@@ -189,7 +191,12 @@ class DeviceManager(private val context: Context) {
             return
         }
 
-        setState(State.RECONNECTING)
+        // Only show RECONNECTING if we had a successful connection before
+        if (hasConnectedOnce) {
+            setState(State.RECONNECTING)
+        } else {
+            setState(State.CONNECTING)
+        }
         scheduleReconnect()
     }
 
@@ -214,6 +221,7 @@ class DeviceManager(private val context: Context) {
                     socket = sock
                     disconnectedSince = 0
                     parser.reset()
+                    hasConnectedOnce = true
                     setState(State.CONNECTED)
                     Log.i(TAG, "Reconnected to $address")
                     startReader(sock.inputStream)
