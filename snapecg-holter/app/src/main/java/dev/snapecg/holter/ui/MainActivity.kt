@@ -295,7 +295,7 @@ class MainActivity : AppCompatActivity() {
             action = HolterService.ACTION_CONNECT
             putExtra(HolterService.EXTRA_ADDRESS, BT_ADDRESS)
         }
-        startForegroundService(intent)
+        startService(intent)
         if (!holterBound) {
             bindService(Intent(this, HolterService::class.java),
                 holterConnection, BIND_AUTO_CREATE)
