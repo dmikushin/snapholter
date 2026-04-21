@@ -22,6 +22,7 @@ import dev.snapecg.holter.recording.RecordingStore
 class MainActivity : AppCompatActivity() {
 
     enum class UiState {
+        HOME,
         SCANNING_CONNECTOR,
         SCANNING_DEVICE,
         DEVICE_READY,
@@ -69,12 +70,7 @@ class MainActivity : AppCompatActivity() {
         requestPermissions()
         requestBatteryOptimizationExclusion()
 
-        // Start and bind connector service
-        startService(Intent(this, ConnectorService::class.java))
-        bindService(Intent(this, ConnectorService::class.java),
-            connectorConnection, BIND_AUTO_CREATE)
-
-        setState(UiState.SCANNING_CONNECTOR)
+        setState(UiState.HOME)
         startPolling()
     }
 
@@ -227,13 +223,28 @@ class MainActivity : AppCompatActivity() {
         secondaryButton.visibility = View.GONE
 
         when (state) {
+            UiState.HOME -> {
+                statusIcon.text = "\u2764\uFE0F" // heart
+                statusTitle.text = "SnapECG Holter"
+                statusMessage.text = "Portable ECG monitoring"
+                primaryButton.text = "Start Holter Session"
+                primaryButton.setOnClickListener {
+                    startService(Intent(this, ConnectorService::class.java))
+                    bindService(Intent(this, ConnectorService::class.java),
+                        connectorConnection, BIND_AUTO_CREATE)
+                    setState(UiState.SCANNING_CONNECTOR)
+                }
+                secondaryButton.visibility = View.VISIBLE
+                secondaryButton.text = "Open Recordings"
+                secondaryButton.setOnClickListener { openRecordingsFolder() }
+            }
             UiState.SCANNING_CONNECTOR -> {
                 statusIcon.text = "\uD83D\uDD0C" // plug
                 spinner.visibility = View.VISIBLE
                 statusTitle.text = "Searching for connector..."
                 statusMessage.text = "Start snapecg-connector on your PC\nand make sure you are on the same network."
                 primaryButton.text = "Cancel"
-                primaryButton.setOnClickListener { finish() }
+                primaryButton.setOnClickListener { setState(UiState.HOME) }
             }
             UiState.SCANNING_DEVICE -> {
                 statusIcon.text = "\uD83D\uDCF6" // signal
@@ -345,6 +356,19 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
+    private fun openRecordingsFolder() {
+        // Open Documents/SnapECG/ in system file manager
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+        }
+        try {
+            startActivity(intent)
+        } catch (_: Exception) {
+            Toast.makeText(this, "No file manager found", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     private fun onShare() {
         val fileName = savedFileName
         if (fileName == null) {
@@ -390,6 +414,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun pollState() {
         when (state) {
+            UiState.HOME -> { /* static */ }
             UiState.SCANNING_CONNECTOR -> {
                 if (connectorService?.isConnectorConnected == true) {
                     connectDevice()
@@ -399,7 +424,7 @@ class MainActivity : AppCompatActivity() {
             UiState.SCANNING_DEVICE -> {
                 if (connectorService?.isConnectorConnected != true) {
                     disconnectDevice()
-                    setState(UiState.SCANNING_CONNECTOR)
+                    setState(UiState.HOME)
                     return
                 }
                 if (holterService?.btState == DeviceManager.State.CONNECTED) {
@@ -409,7 +434,7 @@ class MainActivity : AppCompatActivity() {
             UiState.DEVICE_READY -> {
                 if (connectorService?.isConnectorConnected != true) {
                     disconnectDevice()
-                    setState(UiState.SCANNING_CONNECTOR)
+                    setState(UiState.HOME)
                     return
                 }
                 if (holterService?.btState != DeviceManager.State.CONNECTED) {
