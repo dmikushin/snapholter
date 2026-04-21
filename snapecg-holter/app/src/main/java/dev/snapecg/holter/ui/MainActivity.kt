@@ -368,16 +368,33 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openRecordingsFolder() {
-        // Open Documents/SnapECG/ in system file manager
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "*/*"
+        // Launch the standard Android file manager pointing at Documents
+        val uri = Uri.parse("content://com.android.externalstorage.documents/root/primary")
+        val attempts = listOf(
+            // Standard Android Files app
+            Intent.makeMainActivity(ComponentName(
+                "com.android.documentsui",
+                "com.android.documentsui.files.FilesActivity"
+            )).apply { data = uri },
+            // Xiaomi file manager
+            Intent("com.android.fileexplorer.action.DIR_SEL").apply {
+                putExtra("path", "/storage/emulated/0/Documents/SnapECG")
+            },
+            // Generic fallback
+            Intent(Intent.ACTION_VIEW).apply {
+                data = Uri.parse("file:///storage/emulated/0/Documents/SnapECG/")
+                type = "resource/folder"
+            },
+        )
+        for (intent in attempts) {
+            try {
+                startActivity(intent)
+                return
+            } catch (_: Exception) {}
         }
-        try {
-            startActivity(intent)
-        } catch (_: Exception) {
-            Toast.makeText(this, "No file manager found", Toast.LENGTH_SHORT).show()
-        }
+        Toast.makeText(this,
+            "Open Files app and navigate to Documents/SnapECG/",
+            Toast.LENGTH_LONG).show()
     }
 
     private fun onShare() {
