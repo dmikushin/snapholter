@@ -11,7 +11,6 @@ class QRSDetector {
     companion object {
         private const val ALPHA = 0.125
         private const val INIT_THRESHOLD = 2
-        private const val INIT_RR = 300
         private const val LP_LEN = 10
         private const val HP_LEN = 25
         private const val DERIV_LEN = 2
@@ -19,6 +18,13 @@ class QRSDetector {
         private const val SAMPLE_RATE = 200
         private const val REFRACTORY = 30
         private const val WARMUP = 100
+
+        // Physiologically plausible RR interval bounds (samples at 200 Hz)
+        // 55 samples = 218 BPM, 480 samples = 25 BPM
+        private const val RR_MIN = 55
+        private const val RR_MAX = 480
+        private const val MIN_VALID_BEATS = 3
+        private const val MAX_BEAT_GAP = 400  // 2 seconds — reset confidence if longer
     }
 
     private val lpBuf = IntArray(LP_LEN)
@@ -43,8 +49,9 @@ class QRSDetector {
     private var noiseLevel = 0
     private var threshold = INIT_THRESHOLD
 
-    private val rrBuf = IntArray(8) { INIT_RR }
+    private val rrBuf = IntArray(8)
     private var rrIdx = 0
+    private var validBeatCount = 0
     private var samplesSinceBeat = 0
 
     private var beatCount = 0
@@ -109,6 +116,11 @@ class QRSDetector {
         samplesSinceBeat++
         sampleIdx++
 
+        // Reset confidence if no beat detected for >2 seconds
+        if (samplesSinceBeat > MAX_BEAT_GAP) {
+            validBeatCount = 0
+        }
+
         var x = (sample - 1024) * 2
         x = lpFilt(x)
         x = hpFilt(x)
@@ -130,15 +142,18 @@ class QRSDetector {
 
             signalLevel = (signalLevel + ALPHA * (peak - signalLevel)).toInt()
 
-            rrBuf[rrIdx] = rr
-            rrIdx = (rrIdx + 1) % 8
+            // Only store physiologically plausible RR intervals
+            if (rr in RR_MIN..RR_MAX) {
+                rrBuf[rrIdx] = rr
+                rrIdx = (rrIdx + 1) % 8
+                validBeatCount++
+            }
+            // If RR is implausible (missed beat or false positive),
+            // skip storing in rrBuf but keep signal tracking
 
             beatCount++
-            if (beatCount > 1) {
-                val meanRr = rrBuf.sum() / 8.0
-                if (meanRr > 0) {
-                    hr = (60.0 * SAMPLE_RATE / meanRr).toInt()
-                }
+            if (validBeatCount >= MIN_VALID_BEATS) {
+                hr = computeBpm()
             }
             lastHr = hr
         } else if (peak > 0) {
@@ -148,5 +163,19 @@ class QRSDetector {
         threshold = noiseLevel + (signalLevel - noiseLevel) / 4
 
         return hr
+    }
+
+    /** Compute BPM from median of valid stored RR intervals. */
+    private fun computeBpm(): Int {
+        val valid = rrBuf.filter { it > 0 }.sorted()
+        if (valid.size < MIN_VALID_BEATS) return 0
+
+        val medianRr = if (valid.size % 2 == 0) {
+            (valid[valid.size / 2 - 1] + valid[valid.size / 2]) / 2.0
+        } else {
+            valid[valid.size / 2].toDouble()
+        }
+
+        return (60.0 * SAMPLE_RATE / medianRr).toInt()
     }
 }
