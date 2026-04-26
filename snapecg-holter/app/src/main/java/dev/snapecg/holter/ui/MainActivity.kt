@@ -10,6 +10,7 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.widget.*
+import android.util.Log
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -348,13 +349,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onStopRecording() {
-        holterService?.let { svc ->
-            finalSamples = svc.sampleCount
-            finalDuration = if (svc.startTime > 0)
-                (System.currentTimeMillis() - svc.startTime) / 1000 else 0
+        val svc = holterService
+        if (svc == null) {
+            Log.w("MainActivity", "Stop pressed but HolterService not bound — aborting export")
+            Toast.makeText(this, "Service not ready, try again", Toast.LENGTH_SHORT).show()
+            return
         }
-        // Stop via bound service (synchronous) so DB is updated before export
-        holterService?.stopRecording()
+
+        finalSamples = svc.sampleCount
+        finalDuration = if (svc.startTime > 0)
+            (System.currentTimeMillis() - svc.startTime) / 1000 else 0
+
+        // Call stopRecording on the bound service so closeSession() runs
+        // synchronously before we kick off the export thread. (BT teardown
+        // still happens async inside stopRecording, but that doesn't race
+        // with the export — only sample_count in the DB matters here.)
+        svc.stopRecording()
 
         // Export to EDF in background
         val patientName = patientNameInput.text.toString().trim()
