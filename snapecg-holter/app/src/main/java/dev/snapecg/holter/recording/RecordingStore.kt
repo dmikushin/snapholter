@@ -4,6 +4,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import android.util.Log
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
@@ -385,6 +386,16 @@ class RecordingStore(context: Context) : SQLiteOpenHelper(context, "holter.db", 
             }
 
             writer.close()
+            // Surface clipping in logcat AND in the session status log so an
+            // analyst inspecting either knows whether the export contained
+            // out-of-range samples (typically BT-glitch garbage that EDF
+            // squashed into ±2047, masking the corruption).
+            if (writer.clippedSamples > 0) {
+                Log.w("RecordingStore",
+                    "EDF export $displayName: ${writer.clippedSamples} samples clipped to digital range")
+                logStatus(resolved, "edf_clipped",
+                          "${writer.clippedSamples} samples")
+            }
             return displayName
         }
     }

@@ -43,6 +43,17 @@ class EdfWriter(
     private val headerSize: Int = 256 + numSignals * 256
     private var dataRecordCount = 0
 
+    /**
+     * Number of ECG samples clipped to the `[DIGITAL_MIN, DIGITAL_MAX]`
+     * range over the lifetime of this writer. EDF stores 12-bit signed
+     * values, so any incoming integer outside that range is silently
+     * squashed; tracking the count lets the caller surface "N samples
+     * were out of range" in the export summary so a downstream
+     * cardiologist isn't blindsided by silent data loss.
+     */
+    var clippedSamples: Long = 0L
+        private set
+
     init {
         annSamplesPerRecord = if (hasAnnotations) {
             val maxUserTalBytes = annotations.entries.maxOf { (recordIdx, text) ->
@@ -112,6 +123,12 @@ class EdfWriter(
     /**
      * Write one data record (1 second). The annotation block is built from the
      * `annotations` map passed at construction; record index is tracked internally.
+     *
+     * Any sample outside the `[DIGITAL_MIN, DIGITAL_MAX]` range is silently
+     * clipped — that is part of how EDF stores 12-bit signed ECG, but it
+     * can also mask data corruption (e.g. a stray 0xDEADBEEF from a BT
+     * glitch). [clippedSamples] counts every clip across the whole writer
+     * lifetime so callers can audit the export.
      */
     fun writeDataRecord(samples: IntArray) {
         val ecgBytes = samples.size * 2
@@ -120,7 +137,9 @@ class EdfWriter(
 
         // ECG samples (int16 LE)
         for (s in samples) {
-            buf.putShort(s.coerceIn(DIGITAL_MIN, DIGITAL_MAX).toShort())
+            val clamped = s.coerceIn(DIGITAL_MIN, DIGITAL_MAX)
+            if (clamped != s) clippedSamples++
+            buf.putShort(clamped.toShort())
         }
 
         // EDF Annotations channel: TAL bytes packed directly into 2*Ns byte block.
