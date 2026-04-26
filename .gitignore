@@ -25,3 +25,7 @@ __pycache__/
 keystore.properties
 *.keystore
 *.jks
+
+# End-to-end test artefacts: per-run timestamped dirs of screenshots,
+# logcats, EDFs. Local to each developer machine.
+.e2e-artifacts/
