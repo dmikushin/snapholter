@@ -18,6 +18,9 @@ import dev.snapecg.holter.recording.HolterService
 import dev.snapecg.holter.recording.RecordingStore
 import dev.snapecg.holter.ui.MainActivity
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.DataInputStream
@@ -63,9 +66,22 @@ class ConnectorService : Service() {
     var sessionKey: ByteArray? = null; private set
     private val pairingStore by lazy { PairingStore(this) }
 
-    // Observable connector state (based on port scan discovery)
-    var isConnectorConnected = false; private set
-    var connectorAddress: String? = null; private set
+    // Observable connector state. Direct field reads stay available for the
+    // RPC handlers; UI watchers prefer the StateFlow so they don't need to
+    // poll at 1 Hz.
+    @Volatile var isConnectorConnected = false; private set
+    @Volatile var connectorAddress: String? = null; private set
+
+    data class ConnectorUiState(val connected: Boolean, val address: String?)
+
+    private val _connectorState = MutableStateFlow(ConnectorUiState(false, null))
+    val connectorState: StateFlow<ConnectorUiState> = _connectorState.asStateFlow()
+
+    private fun setConnectorState(connected: Boolean, address: String?) {
+        isConnectorConnected = connected
+        connectorAddress = address
+        _connectorState.value = ConnectorUiState(connected, address)
+    }
 
     // Reference to HolterService (set by MainActivity or self-bound)
     var holterService: HolterService? = null
@@ -174,14 +190,12 @@ class ConnectorService : Service() {
                     if (type != "snapecg_connector") continue
 
                     Log.i(TAG, "Connector announced from $sender")
-                    connectorAddress = sender
-                    isConnectorConnected = true
+                    setConnectorState(connected = true, address = sender)
                     try {
                         connectToConnector(sender)
                     } finally {
                         // connection lifecycle ended — keep listening.
-                        connectorAddress = null
-                        isConnectorConnected = false
+                        setConnectorState(connected = false, address = null)
                     }
                 }
             }
@@ -199,7 +213,7 @@ class ConnectorService : Service() {
             handleConnectorSession(socket)
         } catch (e: Exception) {
             Log.w(TAG, "Connection to connector failed: ${e.message}")
-            isConnectorConnected = false
+            setConnectorState(connected = false, address = null)
             clientSocket = null
         }
     }
@@ -243,7 +257,7 @@ class ConnectorService : Service() {
         } finally {
             socket.close()
             clientSocket = null
-            isConnectorConnected = false
+            setConnectorState(connected = false, address = null)
             // Wipe credentials on disconnect — every reconnect must re-pair.
             endPairingSession()
             Log.i(TAG, "Disconnected from connector")

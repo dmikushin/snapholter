@@ -15,11 +15,16 @@ import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import dev.snapecg.holter.bluetooth.DeviceManager
 import dev.snapecg.holter.connector.ConnectorService
 import dev.snapecg.holter.recording.HolterService
 import dev.snapecg.holter.recording.RecordingStore
 import java.util.Locale
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity() {
 
@@ -45,7 +50,6 @@ class MainActivity : AppCompatActivity() {
     private var connectorService: ConnectorService? = null
     private var holterBound = false
     private var connectorBound = false
-    private val handler = Handler(Looper.getMainLooper())
 
     // Saved stats for COMPLETED screen
     private var finalSamples = 0L
@@ -77,7 +81,6 @@ class MainActivity : AppCompatActivity() {
         requestBatteryOptimizationExclusion()
 
         setState(UiState.HOME)
-        startPolling()
     }
 
     // --- Layout ---
@@ -474,57 +477,69 @@ class MainActivity : AppCompatActivity() {
         startActivity(Intent.createChooser(intent, "Share Recording"))
     }
 
-    // --- Polling & auto-transitions ---
+    // --- Reactive state observation ---
+    //
+    // Replaces the previous 1-Hz Handler-based polling: HolterService and
+    // ConnectorService each expose a StateFlow, and we collect those flows
+    // for as long as the activity is in the STARTED lifecycle state. The
+    // collect coroutines are kicked off when each service binds and
+    // cancelled when it disconnects, so we never have a dangling collector
+    // pointing at a null service.
 
-    private fun startPolling() {
-        handler.postDelayed(object : Runnable {
-            override fun run() {
-                pollState()
-                handler.postDelayed(this, 1000)
-            }
-        }, 1000)
-    }
+    private var liveStatsJob: Job? = null
+    private var connectorStateJob: Job? = null
 
-    private fun pollState() {
-        when (state) {
-            UiState.HOME -> { /* static */ }
-            UiState.SCANNING_CONNECTOR -> {
-                // Waiting for connector (AI assistance requested)
-                if (connectorService?.isConnectorConnected == true) {
-                    onStartRecording() // now connector is ready, proceed
-                }
+    private fun startCollectingHolterStats(svc: HolterService) {
+        liveStatsJob?.cancel()
+        liveStatsJob = lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                svc.liveStats.collect { stats -> onHolterStatsUpdate(stats) }
             }
-            UiState.SCANNING_DEVICE -> {
-                if (holterService?.btState == DeviceManager.State.CONNECTED) {
-                    setState(UiState.DEVICE_READY)
-                }
-            }
-            UiState.DEVICE_READY -> {
-                if (holterService?.btState != DeviceManager.State.CONNECTED) {
-                    setState(UiState.SCANNING_DEVICE)
-                }
-            }
-            UiState.RECORDING -> {
-                updateRecordingStats()
-            }
-            UiState.COMPLETED -> { /* static */ }
         }
     }
 
-    private fun updateRecordingStats() {
-        val svc = holterService ?: return
-        hrText.text = if (svc.lastHr > 0) "${svc.lastHr} bpm" else "-- bpm"
-        batteryText.text = "Battery: ${if (svc.battery >= 0) "${svc.battery}/3" else "--"}" +
-                if (svc.leadOff) "  \u26A0 LEAD OFF" else ""
+    private fun startCollectingConnectorState(svc: ConnectorService) {
+        connectorStateJob?.cancel()
+        connectorStateJob = lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                svc.connectorState.collect { s -> onConnectorStateUpdate(s) }
+            }
+        }
+    }
 
-        val elapsed = if (svc.startTime > 0)
-            (System.currentTimeMillis() - svc.startTime) / 1000 else 0
+    private fun onHolterStatsUpdate(stats: HolterService.LiveStats) {
+        when (state) {
+            UiState.SCANNING_DEVICE ->
+                if (stats.btState == DeviceManager.State.CONNECTED)
+                    setState(UiState.DEVICE_READY)
+            UiState.DEVICE_READY ->
+                if (stats.btState != DeviceManager.State.CONNECTED)
+                    setState(UiState.SCANNING_DEVICE)
+            UiState.RECORDING -> renderRecordingStats(stats)
+            else -> Unit
+        }
+    }
+
+    private fun onConnectorStateUpdate(s: ConnectorService.ConnectorUiState) {
+        if (state == UiState.SCANNING_CONNECTOR && s.connected) {
+            // Connector showed up; resume the recording start path.
+            onStartRecording()
+        }
+    }
+
+    private fun renderRecordingStats(stats: HolterService.LiveStats) {
+        hrText.text = if (stats.lastHr > 0) "${stats.lastHr} bpm" else "-- bpm"
+        batteryText.text = "Battery: ${if (stats.battery >= 0) "${stats.battery}/3" else "--"}" +
+                if (stats.leadOff) "  \u26A0 LEAD OFF" else ""
+
+        val elapsed = if (stats.startTime > 0)
+            (System.currentTimeMillis() - stats.startTime) / 1000 else 0
         val h = elapsed / 3600
         val m = (elapsed % 3600) / 60
         val s = elapsed % 60
         durationText.text = String.format(Locale.US, "%d:%02d:%02d", h, m, s)
-        samplesText.text = "${svc.sampleCount} samples"
-        btStateText.text = when (svc.btState) {
+        samplesText.text = "${stats.sampleCount} samples"
+        btStateText.text = when (stats.btState) {
             DeviceManager.State.CONNECTED -> "BT: Connected"
             DeviceManager.State.RECONNECTING -> "\u26A0 BT: Reconnecting..."
             DeviceManager.State.CONNECTING -> "BT: Connecting..."
@@ -536,25 +551,33 @@ class MainActivity : AppCompatActivity() {
 
     private val holterConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-            holterService = (service as HolterService.LocalBinder).getService()
-            connectorService?.holterService = holterService
+            val svc = (service as HolterService.LocalBinder).getService()
+            holterService = svc
+            connectorService?.holterService = svc
             holterBound = true
+            startCollectingHolterStats(svc)
         }
         override fun onServiceDisconnected(name: ComponentName?) {
             holterService = null
             holterBound = false
+            liveStatsJob?.cancel()
+            liveStatsJob = null
         }
     }
 
     private val connectorConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-            connectorService = (service as ConnectorService.LocalBinder).getService()
-            connectorService?.holterService = holterService
+            val svc = (service as ConnectorService.LocalBinder).getService()
+            connectorService = svc
+            svc.holterService = holterService
             connectorBound = true
+            startCollectingConnectorState(svc)
         }
         override fun onServiceDisconnected(name: ComponentName?) {
             connectorService = null
             connectorBound = false
+            connectorStateJob?.cancel()
+            connectorStateJob = null
         }
     }
 
@@ -607,7 +630,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        handler.removeCallbacksAndMessages(null)
+        // liveStatsJob/connectorStateJob ride lifecycleScope; they cancel
+        // automatically when the activity moves below STARTED.
         if (holterBound) unbindService(holterConnection)
         if (connectorBound) unbindService(connectorConnection)
         super.onDestroy()

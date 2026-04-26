@@ -10,6 +10,9 @@ import dev.snapecg.holter.bluetooth.DeviceManager
 import dev.snapecg.holter.bluetooth.QRSDetector
 import dev.snapecg.holter.ui.MainActivity
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.io.*
 import java.text.SimpleDateFormat
 import java.util.*
@@ -62,6 +65,36 @@ class HolterService : Service(), DeviceManager.Listener {
     @Volatile var leadOff = false; private set
     @Volatile var btState = DeviceManager.State.DISCONNECTED; private set
     @Volatile var firmware = ""; private set
+
+    /**
+     * Snapshot of every live-stat field, published as a StateFlow so the UI
+     * can collect updates reactively instead of polling the @Volatile fields
+     * at 1 Hz from a Handler. Direct field reads remain available for the
+     * connector RPC handlers that need a synchronous view.
+     */
+    data class LiveStats(
+        val isRecording: Boolean,
+        val sampleCount: Long,
+        val startTime: Long,
+        val lastHr: Int,
+        val battery: Int,
+        val leadOff: Boolean,
+        val btState: DeviceManager.State,
+        val firmware: String,
+    )
+
+    private val _liveStats = MutableStateFlow(snapshot())
+    val liveStats: StateFlow<LiveStats> = _liveStats.asStateFlow()
+
+    private fun snapshot() = LiveStats(
+        isRecording, sampleCount, startTime, lastHr,
+        battery, leadOff, btState, firmware,
+    )
+
+    /** Re-emit a snapshot of the @Volatile fields. Cheap; safe to call often. */
+    private fun emitLiveStats() {
+        _liveStats.value = snapshot()
+    }
 
     // Buffer for batched writes
     private val sampleBuffer = mutableListOf<Int>()
@@ -145,6 +178,7 @@ class HolterService : Service(), DeviceManager.Listener {
         startTime = System.currentTimeMillis()
         sampleCount = 0
         isRecording = true
+        emitLiveStats()
 
         // Connect to device (or reuse existing connection)
         if (deviceManager == null) {
@@ -174,6 +208,7 @@ class HolterService : Service(), DeviceManager.Listener {
     fun stopRecording() {
         if (!isRecording) return
         isRecording = false
+        emitLiveStats()
 
         // Capture for async cleanup, then nullify so re-connect works.
         // Detach the listener immediately so any callbacks fired during the
@@ -212,6 +247,7 @@ class HolterService : Service(), DeviceManager.Listener {
 
     override fun onStateChanged(state: DeviceManager.State) {
         btState = state
+        emitLiveStats()
         when (state) {
             DeviceManager.State.CONNECTED -> {
                 serviceScope.launch {
@@ -238,19 +274,28 @@ class HolterService : Service(), DeviceManager.Listener {
             sampleBuffer.add(sample)
         }
         sampleCount++
+        val leadOffChanged = this.leadOff != leadOff
         this.leadOff = leadOff
 
         // QRS detection — sample is baseline-subtracted, restore ADC baseline
         val hr = qrsDetector.process(sample + 2048)
+        val hrChanged = hr > 0 && hr != lastHr
         if (hr > 0) lastHr = hr
+
+        // Throttle: emit only when something user-visible changed.
+        // sampleCount/duration ticks ride the per-second flushSamples emission.
+        if (leadOffChanged || hrChanged) emitLiveStats()
     }
 
     override fun onBattery(level: Int) {
+        if (battery == level) return
         battery = level
+        emitLiveStats()
     }
 
     override fun onVersionReceived(version: String) {
         firmware = version
+        emitLiveStats()
     }
 
     override fun onDeviceInfo(type: Int) {}
@@ -283,7 +328,12 @@ class HolterService : Service(), DeviceManager.Listener {
         val toWrite: List<Int>
         synchronized(sampleBuffer) {
             if (sampleBuffer.isEmpty()) {
-                if (isRecording) flushHandler.postDelayed(flushRunnable, FLUSH_INTERVAL_MS)
+                // Still emit a heartbeat so duration ticks in the UI even
+                // if no samples landed this second.
+                if (isRecording) {
+                    emitLiveStats()
+                    flushHandler.postDelayed(flushRunnable, FLUSH_INTERVAL_MS)
+                }
                 return
             }
             toWrite = sampleBuffer.toList()
@@ -304,6 +354,7 @@ class HolterService : Service(), DeviceManager.Listener {
         }
         updateNotification(statusText)
 
+        emitLiveStats()
         if (isRecording) flushHandler.postDelayed(flushRunnable, FLUSH_INTERVAL_MS)
     }
 
