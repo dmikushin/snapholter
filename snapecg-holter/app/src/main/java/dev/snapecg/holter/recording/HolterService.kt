@@ -165,7 +165,7 @@ class HolterService : Service(), DeviceManager.Listener {
         Log.i(TAG, "Recording started: session=$sessionId address=$address")
     }
 
-    private fun stopRecording() {
+    fun stopRecording() {
         if (!isRecording) return
         isRecording = false
 

@@ -350,10 +350,8 @@ class MainActivity : AppCompatActivity() {
             finalDuration = if (svc.startTime > 0)
                 (System.currentTimeMillis() - svc.startTime) / 1000 else 0
         }
-        val intent = Intent(this, HolterService::class.java).apply {
-            action = HolterService.ACTION_STOP
-        }
-        startService(intent)
+        // Stop via bound service (synchronous) so DB is updated before export
+        holterService?.stopRecording()
 
         // Export to EDF in background
         val patientName = patientNameInput.text.toString().trim()
