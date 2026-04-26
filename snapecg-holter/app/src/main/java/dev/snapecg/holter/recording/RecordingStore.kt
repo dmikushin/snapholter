@@ -155,10 +155,45 @@ class RecordingStore(context: Context) : SQLiteOpenHelper(context, "holter.db", 
         return samples
     }
 
+    /**
+     * Return the most recent `n` samples without paging the entire recording
+     * into memory.
+     *
+     * Each ecg_chunks row holds roughly one second of data (~200 samples), so
+     * we only need ceil(n/200) + 1 newest chunks. Fetching them ordered by
+     * chunk_index DESC and re-flipping to chronological order keeps memory
+     * bounded at ~n samples regardless of recording length — important when
+     * the connector calls this on a 24h Holter session (~17M samples) just
+     * to pull a 10-second strip.
+     */
     fun getRecentSamples(sessionId: Long, n: Int): List<Int> {
+        if (n <= 0) return emptyList()
         val resolved = resolveSessionId(sessionId)
-        val all = readAllSamples(resolved)
-        return if (all.size > n) all.subList(all.size - n, all.size) else all
+        if (resolved < 0) return emptyList()
+
+        val maxChunks = (n + 199) / 200 + 1
+        val cursor = readableDatabase.query(
+            "ecg_chunks", arrayOf("samples"),
+            "session_id=?", arrayOf(resolved.toString()),
+            null, null, "chunk_index DESC", maxChunks.toString()
+        )
+        // Each chunk is internally chronological. We collect chunks newest-
+        // first, then reverse the chunk order so the final list flows
+        // oldest -> newest.
+        val newestFirst = mutableListOf<IntArray>()
+        cursor.use {
+            while (it.moveToNext()) {
+                val blob = it.getBlob(0)
+                newestFirst.add(IntArray(blob.size / 2) { i ->
+                    val lo = blob[i * 2].toInt() and 0xFF
+                    val hi = blob[i * 2 + 1].toInt()
+                    (hi shl 8) or lo
+                })
+            }
+        }
+        val out = ArrayList<Int>(newestFirst.sumOf { it.size })
+        for (chunk in newestFirst.asReversed()) for (s in chunk) out.add(s)
+        return if (out.size > n) out.subList(out.size - n, out.size) else out
     }
 
     // --- Events ---
