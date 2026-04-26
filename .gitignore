@@ -1,0 +1,21 @@
+# Recording artifacts and ad-hoc patches that have accumulated in the repo
+# root during development. They're not meant to be tracked — git history
+# carries the real changes.
+recording_*.csv
+recording_*.db
+recording_*.xml
+recording_*.edf
+*.patch
+
+# Python tooling
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Editor / OS
+*.swp
+.DS_Store
+
+# Multi-agent scratchpad (per-session ephemeral state)
+.agentura/
