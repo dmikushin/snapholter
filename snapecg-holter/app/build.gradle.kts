@@ -13,8 +13,10 @@ android {
         applicationId = "dev.snapecg.holter"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        // CI overrides via -PversionCode=N -PversionName=X.Y.Z so tag pushes
+        // produce APKs that announce their tag, not the hardcoded default.
+        versionCode = (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 1
+        versionName = (project.findProperty("versionName") as String?) ?: "1.0.0"
     }
 
     // Release signing is loaded from app/keystore.properties (gitignored).
