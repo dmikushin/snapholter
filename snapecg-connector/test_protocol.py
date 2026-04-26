@@ -30,6 +30,7 @@ from cryptography.exceptions import InvalidTag
 from protocol import (
     AESGCM,
     GCM_NONCE_BYTES,
+    MAX_MESSAGE_BYTES,
     PAIRING_CODE_ALPHABET,
     PAIRING_CODE_LENGTH,
     PAIRING_KEY_TTL_SECONDS,
@@ -133,6 +134,21 @@ class FramingPlaintextTest(unittest.TestCase):
         json_bytes = bytes(b.data[4:])
         self.assertEqual(length, len(json_bytes))
         self.assertEqual(json.loads(json_bytes), msg)
+
+    def test_oversized_length_prefix_returns_none(self):
+        # MAX_MESSAGE_BYTES caps inbound messages so a 4 GB length prefix
+        # cannot force a multi-GB allocation in readexactly. The defence
+        # is "return None on oversized length" before we read any body.
+        b = MockStream()
+        b.data.extend(struct.pack(">I", MAX_MESSAGE_BYTES + 1))
+        # No body needed — recv should bail at the length check.
+        result = run(recv_message(b))
+        self.assertIsNone(result)
+
+    def test_max_message_bytes_is_one_megabyte(self):
+        # Lock the constant so a careless bump doesn't silently re-open
+        # the DoS window.
+        self.assertEqual(MAX_MESSAGE_BYTES, 1 * 1024 * 1024)
 
 
 class FramingEncryptedTest(unittest.TestCase):

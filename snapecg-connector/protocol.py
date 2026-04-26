@@ -36,6 +36,12 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 CONNECTOR_PORT = 8365
 DISCOVERY_PORT = 8365
 PROTOCOL_VERSION = "1.0"
+# Cap inbound message size. A real ECG strip request returns ~80 KB
+# (10 s × 200 Hz × 4 bytes JSON-encoded + framing); 1 MB leaves an
+# order of magnitude of headroom while killing the trivial DoS where
+# an attacker on the LAN sends a multi-GB length prefix and forces
+# Python's readexactly to allocate the whole thing.
+MAX_MESSAGE_BYTES = 1 * 1024 * 1024
 # Pairing-code alphabet and length. We use a 30-char alphabet that drops
 # the visually-confusable 0/O, 1/I/L, and U (commonly mistyped as V).
 # 16 chars => 30**16 ≈ 2**78.6 entropy, infeasible to offline-brute-force
@@ -153,7 +159,7 @@ async def recv_message(reader: asyncio.StreamReader,
     """Receive length-prefixed JSON message (encrypted if session_key given)."""
     header = await reader.readexactly(4)
     length = struct.unpack('>I', header)[0]
-    if length > 10 * 1024 * 1024:  # 10MB max
+    if length > MAX_MESSAGE_BYTES:
         return None
     payload = await reader.readexactly(length)
     if session_key is not None:

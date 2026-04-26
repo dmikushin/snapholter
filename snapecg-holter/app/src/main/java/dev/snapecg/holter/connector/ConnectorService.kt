@@ -48,6 +48,18 @@ class ConnectorService : Service() {
         // {salt, HMAC(code, salt)} cannot recover the code offline.
         private const val PAIR_ALPHABET = "ABCDEFGHJKMNPQRSTVWXYZ23456789"
         private const val PAIR_CODE_LENGTH = 16
+
+        // Reject framing prefixes larger than this. A real RPC payload tops
+        // out around ~80 KB for a 10s strip request; 1 MB leaves headroom
+        // while killing the trivial DoS where an attacker writes a 4 GB
+        // length prefix and forces readFully to OOM the service. Must
+        // stay in lockstep with snapecg-connector/protocol.py.
+        private const val MAX_MESSAGE_BYTES = 1 * 1024 * 1024
+        // Upper bound on `holter.get_signal` n parameter. 200 Hz × 600 s =
+        // 120 000 samples = 10 minutes of strip is plenty for any analysis;
+        // anything larger is either a buggy client or a DoS attempt that
+        // would build a 4 GB JSONArray.
+        private const val MAX_GET_SIGNAL_SAMPLES = 120_000
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -237,7 +249,7 @@ class ConnectorService : Service() {
         try {
             while (scope.isActive && socket.isConnected) {
                 val length = input.readInt()
-                if (length <= 0 || length > 10 * 1024 * 1024) break
+                if (length <= 0 || length > MAX_MESSAGE_BYTES) break
                 val payload = ByteArray(length)
                 input.readFully(payload)
 
@@ -494,7 +506,11 @@ class ConnectorService : Service() {
     }
 
     private fun handleGetSignal(params: JSONObject): JSONObject {
-        val n = params.optInt("n", 2000) // default 10s at 200Hz
+        // Clamp to a safe upper bound — without this, a malicious or buggy
+        // client requesting n=10**9 would build a multi-GB IntArray and
+        // OOM the service. 120 000 samples = 10 minutes at 200 Hz, which
+        // covers every realistic analysis window.
+        val n = params.optInt("n", 2000).coerceIn(0, MAX_GET_SIGNAL_SAMPLES)
         // Empty list if HolterService isn't bound or there's no recording yet.
         val samples = store?.getRecentSamples(/* sessionId */ -1, n) ?: emptyList()
         val arr = JSONArray()
