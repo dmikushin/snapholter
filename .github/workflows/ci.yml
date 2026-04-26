@@ -41,9 +41,6 @@ jobs:
           distribution: temurin
           java-version: ${{ env.JDK_VERSION }}
 
-      - name: Set up Gradle (caches deps + wrapper distribution)
-        uses: gradle/actions/setup-gradle@v3
-
       - name: Set up Android SDK (platform 34 + build-tools)
         uses: android-actions/setup-android@v3
         with:
@@ -53,6 +50,12 @@ jobs:
         working-directory: snapecg-holter
         run: |
           chmod +x ./gradlew
+          # gradlew is a shell stub that downloads Gradle 8.5 itself if no
+          # `gradle` is on PATH. We deliberately do NOT use gradle/actions
+          # /setup-gradle here because it installs the latest Gradle (9.x
+          # at the time of writing), and AGP 8.2.0 requires Gradle 8.x —
+          # mixing them blows up the build with "Unsupported Gradle version"
+          # or worse, manifest-merger crashes.
           ./gradlew testDebugUnitTest lintDebug --no-daemon
 
       - name: Dump lint + test failure summary
@@ -141,8 +144,6 @@ jobs:
         with:
           distribution: temurin
           java-version: ${{ env.JDK_VERSION }}
-
-      - uses: gradle/actions/setup-gradle@v3
 
       - uses: android-actions/setup-android@v3
         with:
