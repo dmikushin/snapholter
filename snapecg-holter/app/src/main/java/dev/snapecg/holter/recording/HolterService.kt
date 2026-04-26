@@ -169,8 +169,12 @@ class HolterService : Service(), DeviceManager.Listener {
         if (!isRecording) return
         isRecording = false
 
-        // Capture for async cleanup, then nullify so re-connect works
+        // Capture for async cleanup, then nullify so re-connect works.
+        // Detach the listener immediately so any callbacks fired during the
+        // async stopStreaming/disconnect (or after a quick reconnect) don't
+        // overwrite state belonging to a freshly created DeviceManager.
         val dm = deviceManager
+        dm?.listener = null
         deviceManager = null
 
         // Stop streaming off main thread
