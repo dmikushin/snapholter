@@ -557,11 +557,22 @@ class MainActivity : AppCompatActivity() {
     // --- Permissions ---
 
     private fun requestPermissions() {
-        val perms = mutableListOf(
-            Manifest.permission.BLUETOOTH_CONNECT,
-            Manifest.permission.BLUETOOTH_SCAN,
-            Manifest.permission.POST_NOTIFICATIONS,
-        )
+        // Only request permissions that actually exist on the running device's
+        // API level. Asking for BLUETOOTH_CONNECT/SCAN on Android 8-11 (where
+        // they don't exist as runtime permissions yet) returns DENIED forever
+        // and confuses checkSelfPermission. POST_NOTIFICATIONS arrived in
+        // Android 13 (TIRAMISU).
+        val perms = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            perms += Manifest.permission.BLUETOOTH_CONNECT
+            perms += Manifest.permission.BLUETOOTH_SCAN
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            perms += Manifest.permission.POST_NOTIFICATIONS
+        }
+        // Pre-S Bluetooth (BLUETOOTH / BLUETOOTH_ADMIN) is a normal permission,
+        // auto-granted via the manifest entry — no runtime ask needed.
+
         val needed = perms.filter {
             ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
@@ -572,11 +583,22 @@ class MainActivity : AppCompatActivity() {
 
     private fun requestBatteryOptimizationExclusion() {
         val pm = getSystemService(POWER_SERVICE) as PowerManager
-        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+        if (pm.isIgnoringBatteryOptimizations(packageName)) return
+
+        // Only ask once per install — re-prompting on every cold start is
+        // hostile UX (we'd kick the user into Settings every time they
+        // open the app, even if they declined deliberately).
+        val prefs = getSharedPreferences("snapecg", MODE_PRIVATE)
+        if (prefs.getBoolean("battery_optimization_asked", false)) return
+        prefs.edit().putBoolean("battery_optimization_asked", true).apply()
+
+        try {
             val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
                 data = Uri.parse("package:$packageName")
             }
             startActivity(intent)
+        } catch (e: Exception) {
+            Log.w("MainActivity", "Battery optimization request not available: ${e.message}")
         }
     }
 
