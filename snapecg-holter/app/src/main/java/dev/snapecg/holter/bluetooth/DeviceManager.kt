@@ -90,17 +90,23 @@ class DeviceManager(private val context: Context) {
         }
     }
 
-    fun initialize() {
+    /**
+     * Send the device-init handshake. Runs in the caller's coroutine —
+     * uses `delay` (cooperative cancellation, frees the carrier thread)
+     * instead of `Thread.sleep` which would block the IO dispatcher
+     * thread for 600 ms total.
+     */
+    suspend fun initialize() {
         send(Protocol.makeGetVersion())
-        Thread.sleep(150)
+        delay(150)
         send(Protocol.makeGetDeviceInfo())
-        Thread.sleep(150)
+        delay(150)
         send(Protocol.makeSetTime())
-        Thread.sleep(50)
+        delay(50)
         send(Protocol.makeReadAdjustCoeff())
-        Thread.sleep(200)
+        delay(200)
         send(Protocol.makeSetFilterClose())
-        Thread.sleep(50)
+        delay(50)
     }
 
     fun startStreaming() = send(Protocol.makeStart())
@@ -147,10 +153,24 @@ class DeviceManager(private val context: Context) {
         }
 
         // Method 3: reflection channel 1
-        Log.w(TAG, "Trying RFCOMM channel 1 fallback")
-        val s = device!!.javaClass
-            .getMethod("createRfcommSocket", Int::class.java)
-            .invoke(device, 1) as BluetoothSocket
+        // createRfcommSocket(int) is a hidden API; on Android 9+ it lives
+        // behind hidden-API restrictions and may eventually be blocked
+        // outright. Log loudly so a future failure here can be traced
+        // without rebuilding with USB debugging.
+        Log.w(TAG, "Both standard SPP attempts failed — falling back to reflection on createRfcommSocket(int). " +
+                "If this throws on a newer Android version, the device's RFCOMM channel will need to be " +
+                "advertised with a published SDP record.")
+        val s = try {
+            device!!.javaClass
+                .getMethod("createRfcommSocket", Int::class.java)
+                .invoke(device, 1) as BluetoothSocket
+        } catch (e: NoSuchMethodException) {
+            Log.e(TAG, "Reflection fallback unavailable on this Android version: ${e.message}")
+            throw IOException("All connect methods exhausted; createRfcommSocket(int) is hidden", e)
+        } catch (e: ReflectiveOperationException) {
+            Log.e(TAG, "Reflection fallback rejected (hidden-API restriction?): ${e.message}")
+            throw IOException("All connect methods exhausted; reflection blocked", e)
+        }
         try {
             s.connect()
             return s

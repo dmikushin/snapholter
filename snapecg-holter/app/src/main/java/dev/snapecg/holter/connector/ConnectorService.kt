@@ -337,8 +337,7 @@ class ConnectorService : Service() {
 
     private fun handleGetSignal(params: JSONObject): JSONObject {
         val n = params.optInt("n", 2000) // default 10s at 200Hz
-        val hs = holterService ?: return JSONObject().put("error", "not recording")
-        // Get recent samples from store
+        // Empty list if HolterService isn't bound or there's no recording yet.
         val samples = store?.getRecentSamples(/* sessionId */ -1, n) ?: emptyList()
         val arr = JSONArray()
         for (s in samples) arr.put(s + 2048) // restore ADC baseline for analysis
