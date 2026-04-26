@@ -97,16 +97,23 @@ jobs:
         run: python3 verify_edf_annotations.py
 
   # ----------------------------------------------------------------------
-  # Build the debug APK and publish it as a workflow artefact. Runs on
+  # Build the release APK and publish it as a workflow artefact. Runs on
   # every push/PR so a green CI guarantees an installable APK exists.
   # On tag pushes the same APK is forwarded to the release job below.
+  #
+  # Signing: if SIGNING_KEYSTORE_BASE64 (and friends) are set in repo
+  # secrets, the APK is signed with the project release keystore.
+  # Otherwise we fall back to the debug keystore (build.gradle.kts has
+  # the conditional baked in) — fine for pilot sideloading, NOT
+  # acceptable for Play Store distribution.
   # ----------------------------------------------------------------------
   build-apk:
-    name: Build debug APK
+    name: Build release APK
     needs: [kotlin-tests, python-tests]
     runs-on: ubuntu-latest
     outputs:
       apk-name: ${{ steps.rename.outputs.apk-name }}
+      signed:   ${{ steps.signing.outputs.signed }}
     steps:
       - uses: actions/checkout@v4
 
@@ -118,6 +125,31 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           packages: 'platforms;android-34 build-tools;34.0.0 platform-tools'
+
+      - name: Configure release signing (if secrets present)
+        id: signing
+        env:
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS:      ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD:   ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          if [ -n "$SIGNING_KEYSTORE_BASE64" ]; then
+            echo "$SIGNING_KEYSTORE_BASE64" | base64 -d \
+              > snapecg-holter/release.keystore
+            cat > snapecg-holter/app/keystore.properties <<EOF
+          storeFile=release.keystore
+          storePassword=$SIGNING_STORE_PASSWORD
+          keyAlias=$SIGNING_KEY_ALIAS
+          keyPassword=$SIGNING_KEY_PASSWORD
+          EOF
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "Release signing configured from repo secrets."
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "No SIGNING_KEYSTORE_BASE64 secret set;"
+            echo "release will fall back to debug keystore signing."
+          fi
 
       - name: Compute version
         id: version
@@ -134,19 +166,19 @@ jobs:
           echo "code=${{ github.run_number }}" >> "$GITHUB_OUTPUT"
           echo "Building $VERSION_NAME (versionCode ${{ github.run_number }})"
 
-      - name: assembleDebug
+      - name: assembleRelease
         working-directory: snapecg-holter
         run: |
           chmod +x ./gradlew
-          ./gradlew assembleDebug --no-daemon \
+          ./gradlew assembleRelease --no-daemon \
             -PversionName="${{ steps.version.outputs.name }}" \
             -PversionCode="${{ steps.version.outputs.code }}"
 
       - name: Rename APK with version
         id: rename
         run: |
-          APK_NAME="snapecg-holter-${{ steps.version.outputs.name }}-debug.apk"
-          cp snapecg-holter/app/build/outputs/apk/debug/app-debug.apk "$APK_NAME"
+          APK_NAME="snapecg-holter-${{ steps.version.outputs.name }}.apk"
+          cp snapecg-holter/app/build/outputs/apk/release/app-release.apk "$APK_NAME"
           echo "apk-name=$APK_NAME" >> "$GITHUB_OUTPUT"
           ls -lh "$APK_NAME"
 
@@ -189,14 +221,12 @@ jobs:
           body: |
             ## SnapECG Holter `${{ github.ref_name }}`
 
-            **Debug-signed APK**, intended for sideloading and pilot testing.
-            Requires Android 8.0 (API 26) or newer. Not Play-Store-ready —
-            production releases need a real signing keystore (see
-            `app/keystore.properties.example`).
+            **Release-build APK${{ needs.build-apk.outputs.signed == 'true' && ', signed with the project keystore.' || ', debug-signed (no SIGNING_KEYSTORE_BASE64 secret configured) — sideload only, not Play-Store-ready.' }}**
+            Requires Android 8.0 (API 26) or newer.
 
             Install on a connected device with:
             ```bash
-            adb install -t snapecg-holter-${{ github.ref_name }}-debug.apk
+            adb install -t snapecg-holter-${{ github.ref_name }}.apk
             ```
 
             See the auto-generated changelog below for what's new.
