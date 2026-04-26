@@ -47,15 +47,19 @@ class HolterService : Service(), DeviceManager.Listener {
     private var sessionId: Long = -1
     private val qrsDetector = QRSDetector()
 
-    // Live stats
-    var isRecording = false; private set
-    var sampleCount = 0L; private set
-    var startTime = 0L; private set
-    var lastHr = 0; private set
-    var battery = -1; private set
-    var leadOff = false; private set
-    var btState = DeviceManager.State.DISCONNECTED; private set
-    var firmware = ""; private set
+    // Live stats — written from the BT IO coroutine (DeviceManager callbacks)
+    // and from the main-thread flush Runnable, read from the UI thread polling
+    // loop. @Volatile guarantees cross-thread visibility and (for Long) avoids
+    // torn reads on 32-bit ART runtimes that split 64-bit accesses into two
+    // word writes.
+    @Volatile var isRecording = false; private set
+    @Volatile var sampleCount = 0L; private set
+    @Volatile var startTime = 0L; private set
+    @Volatile var lastHr = 0; private set
+    @Volatile var battery = -1; private set
+    @Volatile var leadOff = false; private set
+    @Volatile var btState = DeviceManager.State.DISCONNECTED; private set
+    @Volatile var firmware = ""; private set
 
     // Buffer for batched writes
     private val sampleBuffer = mutableListOf<Int>()

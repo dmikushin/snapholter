@@ -155,7 +155,10 @@ class QRSDetector {
             if (validBeatCount >= MIN_VALID_BEATS) {
                 hr = computeBpm()
             }
-            lastHr = hr
+            // Preserve last good reading during warm-up or low-confidence
+            // intervals — clearing to 0 made the UI flicker "-- bpm" between
+            // beats instead of holding the last valid HR.
+            if (hr > 0) lastHr = hr
         } else if (peak > 0) {
             noiseLevel = (noiseLevel + ALPHA * (peak - noiseLevel)).toInt()
         }
