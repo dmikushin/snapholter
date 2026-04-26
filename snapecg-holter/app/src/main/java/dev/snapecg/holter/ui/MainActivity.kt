@@ -33,7 +33,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
-        private const val BT_ADDRESS = "34:81:F4:1C:3F:C1"
+        private const val TAG = "MainActivity"
+    }
+
+    private val btAddress: String by lazy {
+        dev.snapecg.holter.bluetooth.DeviceResolver.resolve(this)
     }
 
     private var state = UiState.HOME
@@ -310,7 +314,7 @@ class MainActivity : AppCompatActivity() {
     private fun connectDevice() {
         val intent = Intent(this, HolterService::class.java).apply {
             action = HolterService.ACTION_CONNECT
-            putExtra(HolterService.EXTRA_ADDRESS, BT_ADDRESS)
+            putExtra(HolterService.EXTRA_ADDRESS, btAddress)
         }
         startService(intent)
         if (!holterBound) {
@@ -339,7 +343,7 @@ class MainActivity : AppCompatActivity() {
 
         val intent = Intent(this, HolterService::class.java).apply {
             action = HolterService.ACTION_START
-            putExtra(HolterService.EXTRA_ADDRESS, BT_ADDRESS)
+            putExtra(HolterService.EXTRA_ADDRESS, btAddress)
         }
         startForegroundService(intent)
         if (!holterBound) {
@@ -352,7 +356,7 @@ class MainActivity : AppCompatActivity() {
     private fun onStopRecording() {
         val svc = holterService
         if (svc == null) {
-            Log.w("MainActivity", "Stop pressed but HolterService not bound — aborting export")
+            Log.w(TAG, "Stop pressed but HolterService not bound — aborting export")
             Toast.makeText(this, "Service not ready, try again", Toast.LENGTH_SHORT).show()
             return
         }
@@ -598,7 +602,7 @@ class MainActivity : AppCompatActivity() {
             }
             startActivity(intent)
         } catch (e: Exception) {
-            Log.w("MainActivity", "Battery optimization request not available: ${e.message}")
+            Log.w(TAG, "Battery optimization request not available: ${e.message}")
         }
     }
 

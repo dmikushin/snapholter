@@ -262,7 +262,7 @@ class ConnectorService : Service() {
                 "holter.get_signal" -> handleGetSignal(params)
                 "holter.get_events" -> handleGetEvents()
                 "holter.add_event" -> handleAddEvent(params)
-                "holter.start_recording" -> handleStartRecording()
+                "holter.start_recording" -> handleStartRecording(params)
                 "holter.stop_recording" -> handleStopRecording()
                 "holter.get_recording" -> handleGetRecording()
                 "holter.get_summary" -> handleGetSummary()
@@ -377,11 +377,16 @@ class ConnectorService : Service() {
         return JSONObject().put("status", "added")
     }
 
-    private fun handleStartRecording(): JSONObject {
-        // Start via intent to HolterService
+    private fun handleStartRecording(params: JSONObject = JSONObject()): JSONObject {
+        // Address can be passed by the AI agent; otherwise we resolve it the
+        // same way the UI does (saved pref → paired-device auto-detect →
+        // legacy default).
+        val address = params.optString("address", "").ifBlank {
+            dev.snapecg.holter.bluetooth.DeviceResolver.resolve(this)
+        }
         val intent = Intent(this, HolterService::class.java).apply {
             action = HolterService.ACTION_START
-            putExtra(HolterService.EXTRA_ADDRESS, "34:81:F4:1C:3F:C1") // TODO: from params
+            putExtra(HolterService.EXTRA_ADDRESS, address)
         }
         startForegroundService(intent)
         // Bind so we can query status later
