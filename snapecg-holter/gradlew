@@ -1,14 +1,13 @@
 #!/bin/sh
-# Gradle wrapper stub — downloads and runs Gradle
-# In Docker, Gradle is pre-installed. On dev machines, use Android Studio's Gradle.
+# Gradle wrapper stub — downloads and runs the pinned Gradle.
+# Do NOT fall through to a system `gradle` on PATH: AGP 8.2 only
+# accepts Gradle 8.x, but Ubuntu / GitHub-hosted runners ship a much
+# newer Gradle (9.x) which silently breaks the build. Always use the
+# version captured below.
 
 GRADLE_VERSION=8.5
 GRADLE_DIST_URL="https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
 GRADLE_HOME="${HOME}/.gradle/wrapper/dists/gradle-${GRADLE_VERSION}-bin"
-
-if command -v gradle >/dev/null 2>&1; then
-    exec gradle "$@"
-fi
 
 if [ ! -d "$GRADLE_HOME" ]; then
     echo "Downloading Gradle ${GRADLE_VERSION}..."
