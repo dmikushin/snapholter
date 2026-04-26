@@ -20,13 +20,13 @@ import asyncio
 import hashlib
 import hmac
 import json
-import os
 import secrets
 import socket
 import struct
-import ssl
 import time
 from dataclasses import dataclass, field
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
 # --- Constants ---
@@ -37,25 +37,44 @@ PROTOCOL_VERSION = "1.0"
 PAIRING_CODE_LENGTH = 6
 DISCOVERY_MAGIC = b"SNAPECG_DISCOVER"
 DISCOVERY_INTERVAL = 2.0  # seconds between broadcasts
+GCM_NONCE_BYTES = 12       # 96-bit nonce per NIST SP 800-38D
 
 
 # --- Message framing ---
 
-async def send_message(writer: asyncio.StreamWriter, msg: dict):
-    """Send length-prefixed JSON message."""
+async def send_message(writer: asyncio.StreamWriter, msg: dict,
+                       session_key: bytes | None = None):
+    """Send length-prefixed JSON message.
+
+    If `session_key` is given, the JSON payload is encrypted with AES-GCM
+    before framing: wire layout becomes
+        [4 bytes length] [12 bytes nonce] [ciphertext + 16-byte GCM tag].
+    Plaintext-mode wire layout:
+        [4 bytes length] [JSON bytes].
+    """
     payload = json.dumps(msg, ensure_ascii=False).encode('utf-8')
+    if session_key is not None:
+        nonce = secrets.token_bytes(GCM_NONCE_BYTES)
+        ct = AESGCM(session_key).encrypt(nonce, payload, associated_data=None)
+        payload = nonce + ct
     writer.write(struct.pack('>I', len(payload)))
     writer.write(payload)
     await writer.drain()
 
 
-async def recv_message(reader: asyncio.StreamReader) -> dict | None:
-    """Receive length-prefixed JSON message."""
+async def recv_message(reader: asyncio.StreamReader,
+                       session_key: bytes | None = None) -> dict | None:
+    """Receive length-prefixed JSON message (encrypted if session_key given)."""
     header = await reader.readexactly(4)
     length = struct.unpack('>I', header)[0]
     if length > 10 * 1024 * 1024:  # 10MB max
         return None
     payload = await reader.readexactly(length)
+    if session_key is not None:
+        if len(payload) < GCM_NONCE_BYTES + 16:
+            raise ValueError("ciphertext shorter than nonce + GCM tag")
+        nonce, ct = payload[:GCM_NONCE_BYTES], payload[GCM_NONCE_BYTES:]
+        payload = AESGCM(session_key).decrypt(nonce, ct, associated_data=None)
     return json.loads(payload.decode('utf-8'))
 
 
@@ -194,15 +213,22 @@ class AppConnection:
         return False
 
     async def call(self, method: str, params: dict | None = None) -> dict:
-        """Send RPC request to the app and wait for response."""
+        """Send RPC request to the app and wait for response.
+
+        Once paired, the session_key is used to AES-GCM encrypt every
+        message in both directions. The `pair` method itself goes
+        plaintext (handled by `pair()` below), since the key is only
+        established by that exchange.
+        """
         self._request_id += 1
         req = {
             'id': self._request_id,
             'method': method,
             'params': params or {},
         }
-        await send_message(self.writer, req)
-        response = await recv_message(self.reader)
+        key = self.session_key if self.paired else None
+        await send_message(self.writer, req, session_key=key)
+        response = await recv_message(self.reader, session_key=key)
 
         if response is None:
             raise ConnectionError("No response from app")

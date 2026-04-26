@@ -17,8 +17,11 @@ import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.net.*
 import java.security.MessageDigest
+import java.security.SecureRandom
+import javax.crypto.Cipher
 import javax.crypto.Mac
 import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 
@@ -34,9 +37,13 @@ class ConnectorService : Service() {
     companion object {
         private const val TAG = "ConnectorService"
         private const val PORT = 8365
+        // AES-GCM parameters (must match snapecg-connector/protocol.py)
+        private const val GCM_NONCE_BYTES = 12     // 96-bit nonce per NIST SP 800-38D
+        private const val GCM_TAG_BITS = 128       // 16-byte authentication tag
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val secureRandom = SecureRandom()
     private var clientSocket: Socket? = null
 
     // --- Pairing / session crypto state (per TCP session) ---
@@ -176,13 +183,24 @@ class ConnectorService : Service() {
                 if (length <= 0 || length > 10 * 1024 * 1024) break
                 val payload = ByteArray(length)
                 input.readFully(payload)
-                val request = JSONObject(String(payload))
+
+                // Capture pair-state BEFORE handling: a successful `pair`
+                // request comes in plaintext and must be answered in
+                // plaintext (the PC has no key yet at that point).
+                val keyForRequest = if (paired) sessionKey else null
+                val plaintext = if (keyForRequest != null) {
+                    decryptGcm(keyForRequest, payload)
+                } else payload
+                val request = JSONObject(String(plaintext))
 
                 val response = handleRequest(request)
-
                 val respBytes = response.toString().toByteArray()
-                output.writeInt(respBytes.size)
-                output.write(respBytes)
+
+                val outgoing = if (keyForRequest != null) {
+                    encryptGcm(keyForRequest, respBytes)
+                } else respBytes
+                output.writeInt(outgoing.size)
+                output.write(outgoing)
                 output.flush()
             }
         } catch (e: Exception) {
@@ -320,6 +338,35 @@ class ConnectorService : Service() {
         val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
         val spec = PBEKeySpec(password.toCharArray(), salt, iterations, keyBytes * 8)
         return factory.generateSecret(spec).encoded
+    }
+
+    /**
+     * Encrypt with AES-256-GCM. Wire layout: [12-byte nonce] [ciphertext + 16-byte tag].
+     * Matches the Python side in snapecg-connector/protocol.py.
+     */
+    private fun encryptGcm(key: ByteArray, plaintext: ByteArray): ByteArray {
+        val nonce = ByteArray(GCM_NONCE_BYTES).also { secureRandom.nextBytes(it) }
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
+            init(Cipher.ENCRYPT_MODE,
+                 SecretKeySpec(key, "AES"),
+                 GCMParameterSpec(GCM_TAG_BITS, nonce))
+        }
+        val ct = cipher.doFinal(plaintext)
+        return nonce + ct
+    }
+
+    private fun decryptGcm(key: ByteArray, blob: ByteArray): ByteArray {
+        if (blob.size < GCM_NONCE_BYTES + GCM_TAG_BITS / 8) {
+            throw IllegalArgumentException("ciphertext shorter than nonce + GCM tag")
+        }
+        val nonce = blob.copyOfRange(0, GCM_NONCE_BYTES)
+        val ct = blob.copyOfRange(GCM_NONCE_BYTES, blob.size)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
+            init(Cipher.DECRYPT_MODE,
+                 SecretKeySpec(key, "AES"),
+                 GCMParameterSpec(GCM_TAG_BITS, nonce))
+        }
+        return cipher.doFinal(ct)
     }
 
     private fun hexToBytes(hex: String): ByteArray? {
