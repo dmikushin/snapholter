@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -15,9 +17,30 @@ android {
         versionName = "1.0.0"
     }
 
+    // Release signing is loaded from app/keystore.properties (gitignored).
+    // Sample file (app/keystore.properties.example) lists the expected keys.
+    // If the file is missing, ./gradlew assembleRelease falls back to the
+    // debug keystore — fine for local smoke tests, never ship that APK.
+    signingConfigs {
+        val keystorePropsFile = rootProject.file("app/keystore.properties")
+        if (keystorePropsFile.exists()) {
+            create("release") {
+                val props = Properties().apply {
+                    keystorePropsFile.inputStream().use { load(it) }
+                }
+                storeFile = rootProject.file(props.getProperty("storeFile"))
+                storePassword = props.getProperty("storePassword")
+                keyAlias = props.getProperty("keyAlias")
+                keyPassword = props.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("release")
+                ?: signingConfigs.getByName("debug")
         }
     }
 
