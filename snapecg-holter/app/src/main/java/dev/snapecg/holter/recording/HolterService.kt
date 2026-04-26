@@ -253,11 +253,15 @@ class HolterService : Service(), DeviceManager.Listener {
     override fun onConnectionLostTooLong(seconds: Int) {
         if (!isRecording) return
         updateNotification("⚠ BT lost ${seconds}s! Move closer to device.")
-        // Vibrate alert
-        val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 500, 200, 500), -1))
+        // Vibrate alert — VibratorManager is the recommended path on API 31+,
+        // older releases keep the deprecated VIBRATOR_SERVICE.
+        val vibrator: Vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
         }
+        vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 500, 200, 500), -1))
     }
 
     // --- Event diary ---
