@@ -13,7 +13,9 @@ Usage:
 """
 
 import asyncio
+import hmac
 import json
+import secrets
 import sys
 import time
 import socket
@@ -25,7 +27,7 @@ sys.path.insert(0, '../src')
 
 from protocol import (
     CONNECTOR_PORT, PAIRING_CODE_LENGTH, AppConnection, DiscoveryListener,
-    send_message, recv_message,
+    derive_session_key, send_message, recv_message,
 )
 
 
@@ -38,6 +40,10 @@ class HolterConnector:
         self._running = False
         self._broadcast_task = None
         self._server = None
+        # Set when an Android app's TCP connection has been accepted; cleared
+        # on disconnect. Lets `pair()` wait for the app instead of trying to
+        # dial it (the phone is the TCP client in this protocol).
+        self._app_connected: asyncio.Event = asyncio.Event()
 
     # --- Discovery ---
 
@@ -100,29 +106,61 @@ class HolterConnector:
 
     # --- Pairing ---
 
-    async def pair(self, address: str, port: int = CONNECTOR_PORT,
-                   code: str | None = None) -> dict:
-        """Initiate pairing with Android app.
+    async def pair(self, address: str | None = None,
+                   port: int = CONNECTOR_PORT,
+                   code: str | None = None,
+                   wait_seconds: float = 60.0) -> dict:
+        """Pair with the Android app over its TCP connection to us.
 
-        The phone generates the code on each new TCP session and prints it via
-        `adb logcat -s ConnectorService` (look for PAIRING_CODE=NNNNNN). The
-        user reads that code and types it on the PC; we then HMAC-prove
-        knowledge of it.
+        The phone is the TCP client in this protocol — it dials the
+        connector after seeing our UDP broadcast. So `pair` does NOT open
+        a new socket; instead it waits for the app to connect (up to
+        `wait_seconds`) and then sends the HMAC pair request through
+        that already-accepted stream.
+
+        The phone generates a fresh 6-digit code on every TCP session and
+        prints it via `adb logcat -s ConnectorService` (PAIRING_CODE=NNNNNN).
+        Type that code here.
+
+        `address` is purely informational (lets callers preview where the
+        connection is expected to come from); the actual address is taken
+        from the accepted socket.
         """
         if code is None:
             code = input("Pairing code from phone (PAIRING_CODE=...): ").strip()
         if not code or len(code) != PAIRING_CODE_LENGTH or not code.isdigit():
-            return {'status': 'failed', 'reason': f'expected {PAIRING_CODE_LENGTH}-digit code'}
+            return {'status': 'failed',
+                    'reason': f'expected {PAIRING_CODE_LENGTH}-digit code'}
 
-        self.app = AppConnection(address=address, port=port)
-        await self.app.connect()
+        # Wait for the app to dial us, if it hasn't already.
+        if not self.app:
+            print(f"Waiting up to {int(wait_seconds)}s for the app to connect...")
+            try:
+                await asyncio.wait_for(self._app_connected.wait(),
+                                       timeout=wait_seconds)
+            except asyncio.TimeoutError:
+                return {'status': 'failed',
+                        'reason': 'no app connection within timeout — '
+                                  'is the connector daemon running?'}
+        if not self.app:
+            return {'status': 'failed', 'reason': 'app vanished before pair'}
 
-        if await self.app.pair(code):
-            return {'status': 'paired', 'address': address}
-        else:
-            await self.app.disconnect()
-            self.app = None
-            return {'status': 'failed', 'reason': 'phone rejected proof (wrong code?)'}
+        salt = secrets.token_bytes(16)
+        proof = hmac.new(code.encode(), salt, 'sha256').hexdigest()
+        try:
+            result = await self.app.call('pair', {
+                'salt': salt.hex(),
+                'proof': proof,
+            })
+        except Exception as e:
+            return {'status': 'failed', 'reason': f'pair RPC failed: {e}'}
+
+        if result.get('status') == 'paired':
+            self.app.session_key = derive_session_key(code, salt)
+            self.app.paired = True
+            return {'status': 'paired', 'address': self.app.address}
+        return {'status': 'failed',
+                'reason': result.get('error', 'phone rejected proof')}
 
     # --- Bridge to app ---
 
@@ -316,7 +354,19 @@ class HolterConnector:
     # --- Server for incoming app connections ---
 
     async def _handle_app_connection(self, reader, writer):
-        """Handle incoming TCP connection from Android app."""
+        """Hold the incoming TCP connection from the Android app.
+
+        Important: we deliberately do NOT call recv_message here. The
+        actual RPC traffic is consumed by `AppConnection.call()` against
+        the same StreamReader; if this handler also read, the two would
+        race over each frame and bytes would go to whichever happened
+        to be scheduled first.
+
+        Instead we just publish the connection on `self.app`, signal
+        `_app_connected`, and park until the peer closes (detected via
+        `reader.at_eof()`, which is set by asyncio's protocol layer when
+        the transport hits FIN/RST — no read required).
+        """
         addr = writer.get_extra_info('peername')
         print(f"App connected from {addr}")
 
@@ -324,21 +374,20 @@ class HolterConnector:
             address=addr[0], port=addr[1],
             reader=reader, writer=writer,
         )
+        self._app_connected.set()
 
-        # NOTE: pairing is HMAC-driven and initiated by `AppConnection.pair()`
-        # (called from CLI/MCP), not by passive messages on the wire. Whatever
-        # the app pushes here gets consumed so the connection stays alive
-        # until shutdown — actual RPC traffic flows through `app.call()`.
         try:
-            while self._running:
-                msg = await recv_message(reader)
-                if msg is None:
-                    break
-        except (asyncio.IncompleteReadError, ConnectionError):
-            pass
+            while self._running and not reader.at_eof():
+                await asyncio.sleep(1.0)
         finally:
             print(f"App disconnected from {addr}")
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
             self.app = None
+            self._app_connected.clear()
 
     async def start_server(self):
         """Start TCP server and broadcast loop."""
@@ -412,14 +461,33 @@ class HolterConnector:
                 sys.stdout.flush()
 
 
+    async def run_pair_workflow(self):
+        """One-shot: start the broadcast/server stack, wait for the
+        Android app to dial in, prompt for the code, complete pairing,
+        then shut down. Used by `connector.py --pair`."""
+        self._running = True
+        self._server = await asyncio.start_server(
+            self._handle_app_connection, '0.0.0.0', CONNECTOR_PORT,
+        )
+        self._broadcast_task = asyncio.create_task(self._broadcast_loop())
+        print("Connector listening; waiting for app to dial in...")
+
+        try:
+            result = await self.pair(address=None)
+            print(json.dumps(result, indent=2))
+            return result
+        finally:
+            self.stop()
+
+
 def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="SnapECG Holter Connector")
     parser.add_argument("--mcp", action="store_true", help="Run as MCP server (stdio)")
     parser.add_argument("--discover", action="store_true", help="Discover devices and exit")
-    parser.add_argument("--pair", metavar="ADDRESS",
-                        help="Pair with the Android app at the given IP and exit")
+    parser.add_argument("--pair", action="store_true",
+                        help="Run a one-shot pairing workflow and exit")
     args = parser.parse_args()
 
     connector = HolterConnector()
@@ -438,8 +506,7 @@ def main():
         else:
             print("  No devices found.")
     elif args.pair:
-        result = asyncio.run(connector.pair(args.pair))
-        print(json.dumps(result, indent=2))
+        result = asyncio.run(connector.run_pair_workflow())
         sys.exit(0 if result.get('status') == 'paired' else 1)
     elif args.mcp:
         asyncio.run(connector.run_mcp())

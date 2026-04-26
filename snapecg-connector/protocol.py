@@ -166,7 +166,14 @@ class DiscoveryListener:
 
 @dataclass
 class AppConnection:
-    """Active connection to the Android app."""
+    """Active connection to the Android app.
+
+    The phone is always the TCP client in this protocol — it dials us
+    after seeing our UDP discovery broadcast — so this class is only
+    ever populated by the server side accepting an incoming connection
+    (see HolterConnector._handle_app_connection). It does NOT know how
+    to dial the phone; the phone has no listening socket on 8365.
+    """
     address: str
     port: int
     reader: asyncio.StreamReader | None = None
@@ -174,21 +181,6 @@ class AppConnection:
     paired: bool = False
     session_key: bytes | None = None
     _request_id: int = 0
-
-    async def connect(self):
-        """Establish TCP connection to the app."""
-        self.reader, self.writer = await asyncio.open_connection(self.address, self.port)
-
-    async def disconnect(self):
-        """Close connection."""
-        if self.writer:
-            self.writer.close()
-            try:
-                await self.writer.wait_closed()
-            except Exception:
-                pass
-            self.writer = None
-            self.reader = None
 
     async def pair(self, code: str) -> bool:
         """
