@@ -16,14 +16,6 @@ import org.json.JSONObject
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.net.*
-import java.security.MessageDigest
-import java.security.SecureRandom
-import javax.crypto.Cipher
-import javax.crypto.Mac
-import javax.crypto.SecretKeyFactory
-import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.PBEKeySpec
-import javax.crypto.spec.SecretKeySpec
 
 /**
  * Service handling PC connector discovery and communication.
@@ -37,13 +29,9 @@ class ConnectorService : Service() {
     companion object {
         private const val TAG = "ConnectorService"
         private const val PORT = 8365
-        // AES-GCM parameters (must match snapecg-connector/protocol.py)
-        private const val GCM_NONCE_BYTES = 12     // 96-bit nonce per NIST SP 800-38D
-        private const val GCM_TAG_BITS = 128       // 16-byte authentication tag
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val secureRandom = SecureRandom()
     private var clientSocket: Socket? = null
 
     // --- Pairing / session crypto state (per TCP session) ---
@@ -308,78 +296,28 @@ class ConnectorService : Service() {
         if (saltHex.isEmpty() || proofHex.isEmpty()) {
             return JSONObject().put("error", "salt and proof required")
         }
-        val salt = hexToBytes(saltHex)
+        val salt = ConnectorCrypto.hexToBytes(saltHex)
             ?: return JSONObject().put("error", "invalid salt")
-        val proof = hexToBytes(proofHex)
+        val proof = ConnectorCrypto.hexToBytes(proofHex)
             ?: return JSONObject().put("error", "invalid proof")
 
-        val expected = hmacSha256(code.toByteArray(Charsets.UTF_8), salt)
-        if (!MessageDigest.isEqual(expected, proof)) {
+        if (!ConnectorCrypto.verifyProof(code, salt, proof)) {
             Log.w(TAG, "Pairing rejected: HMAC mismatch")
             return JSONObject().put("error", "invalid proof")
         }
 
-        sessionKey = pbkdf2(code, salt, iterations = 100_000, keyBytes = 32)
+        sessionKey = ConnectorCrypto.deriveSessionKey(code, salt)
         paired = true
         pendingPairCode = null  // one-shot — code can't be reused
         Log.i(TAG, "Paired successfully (session key derived)")
         return JSONObject().put("status", "paired")
     }
 
-    // --- Crypto helpers ---
-
-    private fun hmacSha256(key: ByteArray, data: ByteArray): ByteArray {
-        val mac = Mac.getInstance("HmacSHA256")
-        mac.init(SecretKeySpec(key, "HmacSHA256"))
-        return mac.doFinal(data)
-    }
-
-    private fun pbkdf2(password: String, salt: ByteArray, iterations: Int, keyBytes: Int): ByteArray {
-        val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-        val spec = PBEKeySpec(password.toCharArray(), salt, iterations, keyBytes * 8)
-        return factory.generateSecret(spec).encoded
-    }
-
-    /**
-     * Encrypt with AES-256-GCM. Wire layout: [12-byte nonce] [ciphertext + 16-byte tag].
-     * Matches the Python side in snapecg-connector/protocol.py.
-     */
-    private fun encryptGcm(key: ByteArray, plaintext: ByteArray): ByteArray {
-        val nonce = ByteArray(GCM_NONCE_BYTES).also { secureRandom.nextBytes(it) }
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
-            init(Cipher.ENCRYPT_MODE,
-                 SecretKeySpec(key, "AES"),
-                 GCMParameterSpec(GCM_TAG_BITS, nonce))
-        }
-        val ct = cipher.doFinal(plaintext)
-        return nonce + ct
-    }
-
-    private fun decryptGcm(key: ByteArray, blob: ByteArray): ByteArray {
-        if (blob.size < GCM_NONCE_BYTES + GCM_TAG_BITS / 8) {
-            throw IllegalArgumentException("ciphertext shorter than nonce + GCM tag")
-        }
-        val nonce = blob.copyOfRange(0, GCM_NONCE_BYTES)
-        val ct = blob.copyOfRange(GCM_NONCE_BYTES, blob.size)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
-            init(Cipher.DECRYPT_MODE,
-                 SecretKeySpec(key, "AES"),
-                 GCMParameterSpec(GCM_TAG_BITS, nonce))
-        }
-        return cipher.doFinal(ct)
-    }
-
-    private fun hexToBytes(hex: String): ByteArray? {
-        if (hex.length % 2 != 0) return null
-        val out = ByteArray(hex.length / 2)
-        for (i in out.indices) {
-            val hi = Character.digit(hex[i * 2], 16)
-            val lo = Character.digit(hex[i * 2 + 1], 16)
-            if (hi < 0 || lo < 0) return null
-            out[i] = ((hi shl 4) or lo).toByte()
-        }
-        return out
-    }
+    // Thin delegates so callers in this file stay readable; logic is in ConnectorCrypto.
+    private fun encryptGcm(key: ByteArray, plaintext: ByteArray) =
+        ConnectorCrypto.encryptGcm(key, plaintext)
+    private fun decryptGcm(key: ByteArray, blob: ByteArray) =
+        ConnectorCrypto.decryptGcm(key, blob)
 
     // --- API handlers ---
 
