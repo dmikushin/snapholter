@@ -326,13 +326,16 @@ class HolterService : Service(), DeviceManager.Listener {
         this.leadOff = leadOff
         // Lead-off transitions are clinically relevant — a sudden flip
         // means the electrode lost contact and the next few seconds of
-        // signal are unreliable. Log at info so it shows up in bug
-        // reports without needing verbose filtering.
+        // signal are unreliable. Persist them to the events table so
+        // they survive into the EDF+ annotation channel: a cardiologist
+        // reading the export later needs to know which segments to
+        // discard. Without this the lead-off bit is only present in
+        // the raw ECG samples (for offline analysis), which most EDF
+        // viewers will not surface.
         if (leadOffChanged) {
-            Log.i(TAG, if (leadOff)
-                "Lead-off ASSERTED at sample $sampleCount"
-            else
-                "Lead-off cleared at sample $sampleCount")
+            val msg = if (leadOff) "lead-off asserted" else "lead-off cleared"
+            Log.i(TAG, "Lead-off ${if (leadOff) "ASSERTED" else "cleared"} at sample $sampleCount")
+            store?.addEvent(sessionId, sampleCount, msg, "lead_off")
         }
 
         // QRS detection — DeviceManager hands us baseline-subtracted samples
