@@ -55,14 +55,28 @@ jobs:
           chmod +x ./gradlew
           ./gradlew testDebugUnitTest lintDebug --no-daemon
 
+      - name: Dump lint failure summary on failure
+        if: failure()
+        working-directory: snapecg-holter
+        run: |
+          echo "=== lint-results-debug.txt (head) ==="
+          head -120 app/build/reports/lint-results-debug.txt 2>/dev/null || echo "no .txt report"
+          echo
+          echo "=== test failures ==="
+          find app/build/reports/tests/testDebugUnitTest -name '*.html' 2>/dev/null \
+            | head -5
+          find app/build/test-results -name '*.xml' 2>/dev/null \
+            | xargs grep -l "<failure\|<error" 2>/dev/null \
+            | xargs -I {} sh -c 'echo "--- {} ---"; cat {}' 2>/dev/null | head -200
+
       - name: Upload reports on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: kotlin-reports
-          path: |
-            snapecg-holter/app/build/reports/tests/
-            snapecg-holter/app/build/reports/lint-results-debug.html
+          path: snapecg-holter/app/build/reports/
+          if-no-files-found: warn
+          retention-days: 7
 
   # ----------------------------------------------------------------------
   # Python: connector protocol round-trip (33 tests) + EDF format (8 tests).
