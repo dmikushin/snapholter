@@ -31,9 +31,12 @@
 
     <application
         android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/full_backup_content"
+        android:icon="@drawable/ic_launcher"
         android:label="SnapECG Holter"
         android:supportsRtl="true"
-        android:theme="@style/Theme.Material3.DayNight.NoActionBar">
+        android:theme="@style/Theme.SnapECG">
 
         <activity
             android:name=".ui.MainActivity"

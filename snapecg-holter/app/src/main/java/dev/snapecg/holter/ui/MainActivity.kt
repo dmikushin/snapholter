@@ -209,8 +209,11 @@ class MainActivity : ComponentActivity() {
                 putExtra("path", "/storage/emulated/0/Documents/SnapECG")
             },
             Intent(Intent.ACTION_VIEW).apply {
-                data = Uri.parse("file:///storage/emulated/0/Documents/SnapECG/")
-                type = "resource/folder"
+                // setData + setType clear each other; setDataAndType keeps both.
+                setDataAndType(
+                    Uri.parse("file:///storage/emulated/0/Documents/SnapECG/"),
+                    "resource/folder",
+                )
             },
         )
         for (intent in attempts) {
@@ -302,6 +305,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Ask the user to exempt SnapECG from battery optimization.
+     *
+     * Lint flags REQUEST_IGNORE_BATTERY_OPTIMIZATIONS as a Play Store policy
+     * concern, but the policy explicitly carves out apps whose primary
+     * function requires uninterrupted background execution — continuous
+     * Holter ECG capture over 24 hours is exactly that case (a missed BT
+     * read = a gap in cardiac data, not a missed notification). We ask
+     * once, persist a flag in SharedPreferences, and never re-prompt.
+     */
+    @Suppress("BatteryLife")
     private fun requestBatteryOptimizationExclusion() {
         val pm = getSystemService(POWER_SERVICE) as PowerManager
         if (pm.isIgnoringBatteryOptimizations(packageName)) return

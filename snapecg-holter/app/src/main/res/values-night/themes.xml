@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Dark-mode override; selected automatically when the device is in
+     night mode. Compose's MaterialTheme inside the activity still
+     supplies the actual scheme colors. -->
+<resources>
+    <style name="Theme.SnapECG" parent="@android:style/Theme.Material.NoActionBar" />
+</resources>

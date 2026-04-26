@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Pre-Android-12 backup exclusion. allowBackup="false" already disables
+    backup on every API level, but lint asks for fullBackupContent in
+    addition so the rule is explicit on older devices that ignore the
+    newer dataExtractionRules attribute.
+-->
+<full-backup-content>
+    <exclude domain="root" />
+    <exclude domain="file" />
+    <exclude domain="database" />
+    <exclude domain="sharedpref" />
+    <exclude domain="external" />
+</full-backup-content>

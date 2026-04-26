@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Activity-level theme for SnapECG Holter.
+
+    The actual visual theming (colors, typography, shapes) is handled by
+    `MaterialTheme { ... }` inside the Compose hierarchy in MainActivity,
+    so the framework theme here only needs to do two things:
+      1. Disable the action bar (Compose draws its own toolbar/headers).
+      2. Pick a sensible window background that looks fine before the
+         first composition is laid out.
+
+    Using the platform's built-in Material theme means we don't need to
+    drag in androidx.appcompat or com.google.android.material just for
+    this XML lookup. A values-night/ override picks the dark variant
+    automatically when the device is in dark mode.
+-->
+<resources>
+    <style name="Theme.SnapECG" parent="@android:style/Theme.Material.Light.NoActionBar" />
+</resources>

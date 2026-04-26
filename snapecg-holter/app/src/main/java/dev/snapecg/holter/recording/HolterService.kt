@@ -168,10 +168,14 @@ class HolterService : Service(), DeviceManager.Listener {
         // Foreground notification
         startForeground(NOTIFICATION_ID, buildNotification("Connecting..."))
 
-        // Wake lock
+        // Wake lock — bounded so a stuck recording can't keep the CPU
+        // pinned forever. 25 hours covers the longest realistic Holter
+        // session (24h + slack); if recording somehow outlives it the
+        // OS will release the lock and stopRecording will simply not
+        // re-acquire (we are already past the planned lifetime).
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "snapecg:holter")
-        wakeLock?.acquire()
+        wakeLock?.acquire(25L * 60 * 60 * 1000)
 
         // Start session in database
         sessionId = store!!.createSession(address)
