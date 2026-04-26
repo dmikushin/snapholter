@@ -27,7 +27,7 @@ sys.path.insert(0, '../src')
 
 from protocol import (
     CONNECTOR_PORT, PAIRING_CODE_LENGTH, AppConnection, DiscoveryListener,
-    derive_session_key, send_message, recv_message,
+    PairingStore, derive_session_key, send_message, recv_message,
 )
 
 
@@ -44,6 +44,9 @@ class HolterConnector:
         # on disconnect. Lets `pair()` wait for the app instead of trying to
         # dial it (the phone is the TCP client in this protocol).
         self._app_connected: asyncio.Event = asyncio.Event()
+        # Persistent storage of session keys per phone IP, so a quick
+        # reconnect (Wi-Fi drop, app restart) skips the code re-entry.
+        self.pairing_store = PairingStore()
 
     # --- Discovery ---
 
@@ -106,32 +109,48 @@ class HolterConnector:
 
     # --- Pairing ---
 
+    async def _try_resume(self) -> dict | None:
+        """If we have a stored key for this peer, try `resume` and skip
+        code re-entry. Returns the result dict on success, None if no
+        saved key or the phone rejected it (caller should fall back to
+        fresh pair)."""
+        peer = self.app.address if self.app else None
+        if not peer:
+            return None
+        saved = self.pairing_store.load_if_fresh(peer)
+        if not saved:
+            return None
+        salt = secrets.token_bytes(16)
+        proof = hmac.new(saved, salt, 'sha256').hexdigest()
+        try:
+            result = await self.app.call('resume', {
+                'salt': salt.hex(),
+                'proof': proof,
+            })
+        except Exception as e:
+            print(f"  resume RPC failed: {e} — falling back to fresh pair")
+            return None
+        if result.get('status') == 'resumed':
+            self.app.session_key = saved
+            self.app.paired = True
+            print(f"  Resumed previous pairing with {peer}")
+            return {'status': 'paired', 'address': peer, 'resumed': True}
+        # Phone said needs_pair (key drift / TTL expired / no record).
+        # Clear our stale entry to avoid retrying it on every reconnect.
+        print(f"  Resume rejected: {result.get('error', 'unknown')}; will pair fresh")
+        self.pairing_store.forget(peer)
+        return None
+
     async def pair(self, address: str | None = None,
                    port: int = CONNECTOR_PORT,
                    code: str | None = None,
                    wait_seconds: float = 60.0) -> dict:
         """Pair with the Android app over its TCP connection to us.
 
-        The phone is the TCP client in this protocol — it dials the
-        connector after seeing our UDP broadcast. So `pair` does NOT open
-        a new socket; instead it waits for the app to connect (up to
-        `wait_seconds`) and then sends the HMAC pair request through
-        that already-accepted stream.
-
-        The phone generates a fresh 6-digit code on every TCP session and
-        prints it via `adb logcat -s ConnectorService` (PAIRING_CODE=NNNNNN).
-        Type that code here.
-
-        `address` is purely informational (lets callers preview where the
-        connection is expected to come from); the actual address is taken
-        from the accepted socket.
+        First attempts a silent `resume` using a saved session key (if
+        one exists for this peer within the TTL window); falls back to
+        the interactive code prompt + HMAC pair flow on resume failure.
         """
-        if code is None:
-            code = input("Pairing code from phone (PAIRING_CODE=...): ").strip()
-        if not code or len(code) != PAIRING_CODE_LENGTH or not code.isdigit():
-            return {'status': 'failed',
-                    'reason': f'expected {PAIRING_CODE_LENGTH}-digit code'}
-
         # Wait for the app to dial us, if it hasn't already.
         if not self.app:
             print(f"Waiting up to {int(wait_seconds)}s for the app to connect...")
@@ -145,6 +164,18 @@ class HolterConnector:
         if not self.app:
             return {'status': 'failed', 'reason': 'app vanished before pair'}
 
+        # Try resume first — silent, no user interaction.
+        resume_result = await self._try_resume()
+        if resume_result is not None:
+            return resume_result
+
+        # Fresh pair: prompt for code if one wasn't supplied.
+        if code is None:
+            code = input("Pairing code from phone (PAIRING_CODE=...): ").strip()
+        if not code or len(code) != PAIRING_CODE_LENGTH or not code.isdigit():
+            return {'status': 'failed',
+                    'reason': f'expected {PAIRING_CODE_LENGTH}-digit code'}
+
         salt = secrets.token_bytes(16)
         proof = hmac.new(code.encode(), salt, 'sha256').hexdigest()
         try:
@@ -156,9 +187,12 @@ class HolterConnector:
             return {'status': 'failed', 'reason': f'pair RPC failed: {e}'}
 
         if result.get('status') == 'paired':
-            self.app.session_key = derive_session_key(code, salt)
+            session_key = derive_session_key(code, salt)
+            self.app.session_key = session_key
             self.app.paired = True
-            return {'status': 'paired', 'address': self.app.address}
+            self.pairing_store.save(self.app.address, session_key)
+            return {'status': 'paired', 'address': self.app.address,
+                    'resumed': False}
         return {'status': 'failed',
                 'reason': result.get('error', 'phone rejected proof')}
 

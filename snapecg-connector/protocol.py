@@ -20,11 +20,13 @@ import asyncio
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import socket
 import struct
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -38,6 +40,67 @@ PAIRING_CODE_LENGTH = 6
 DISCOVERY_MAGIC = b"SNAPECG_DISCOVER"
 DISCOVERY_INTERVAL = 2.0  # seconds between broadcasts
 GCM_NONCE_BYTES = 12       # 96-bit nonce per NIST SP 800-38D
+PAIRING_KEY_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days, matches Android PairingStore
+
+
+# --- Pairing persistence (PC side) ---
+
+class PairingStore:
+    """Plain JSON file at ~/.config/snapecg/pairing.json mapping peer
+    address (the phone's IP) to {key_hex, ts}.
+
+    Mirrors the Android-side EncryptedSharedPreferences PairingStore so
+    a quick reconnect can `resume` instead of forcing a code re-entry.
+    No crypto on the file itself — protect it with file-system perms
+    (mode 0600). Treat its contents as session keys: if the file leaks,
+    rotate by deleting it (next pair will issue a new key).
+    """
+
+    def __init__(self, path: Path | None = None):
+        self.path = path or (
+            Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+            / "snapecg" / "pairing.json"
+        )
+
+    def _load(self) -> dict:
+        if not self.path.exists():
+            return {}
+        try:
+            return json.loads(self.path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _save(self, data: dict):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(data, indent=2))
+        try:
+            os.chmod(self.path, 0o600)
+        except OSError:
+            pass
+
+    def save(self, peer_address: str, session_key: bytes):
+        data = self._load()
+        data[peer_address] = {
+            "key_hex": session_key.hex(),
+            "ts": time.time(),
+        }
+        self._save(data)
+
+    def load_if_fresh(self, peer_address: str) -> bytes | None:
+        entry = self._load().get(peer_address)
+        if not entry:
+            return None
+        if time.time() - entry.get("ts", 0) > PAIRING_KEY_TTL_SECONDS:
+            return None
+        try:
+            return bytes.fromhex(entry["key_hex"])
+        except (KeyError, ValueError):
+            return None
+
+    def forget(self, peer_address: str):
+        data = self._load()
+        data.pop(peer_address, None)
+        self._save(data)
 
 
 # --- Message framing ---

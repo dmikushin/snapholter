@@ -17,9 +17,13 @@ import asyncio
 import hashlib
 import hmac
 import json
+import os
 import struct
 import sys
+import tempfile
+import time
 import unittest
+from pathlib import Path
 
 from cryptography.exceptions import InvalidTag
 
@@ -27,6 +31,8 @@ from protocol import (
     AESGCM,
     GCM_NONCE_BYTES,
     PAIRING_CODE_LENGTH,
+    PAIRING_KEY_TTL_SECONDS,
+    PairingStore,
     send_message,
     recv_message,
 )
@@ -208,6 +214,63 @@ class CrossLanguageInteropTest(unittest.TestCase):
         b.data.extend(body)
         parsed = run(recv_message(b, session_key=key))
         self.assertEqual(parsed, {"hello": "world", "n": 42})
+
+
+class PairingStorePersistenceTest(unittest.TestCase):
+    """PairingStore round-trip, TTL expiry, peer isolation, mode-0600 perms."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmpdir.name) / "pairing.json"
+        self.store = PairingStore(self.path)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_save_then_load_roundtrip(self):
+        key = bytes.fromhex(VECTOR_SESSION_KEY_HEX)
+        self.store.save("192.168.1.42", key)
+        self.assertEqual(self.store.load_if_fresh("192.168.1.42"), key)
+
+    def test_load_returns_none_when_missing(self):
+        self.assertIsNone(self.store.load_if_fresh("nope"))
+
+    def test_load_isolates_by_peer_address(self):
+        self.store.save("10.0.0.1", b"\x01" * 32)
+        self.store.save("10.0.0.2", b"\x02" * 32)
+        self.assertEqual(self.store.load_if_fresh("10.0.0.1"), b"\x01" * 32)
+        self.assertEqual(self.store.load_if_fresh("10.0.0.2"), b"\x02" * 32)
+        self.assertIsNone(self.store.load_if_fresh("10.0.0.3"))
+
+    def test_load_returns_none_when_expired(self):
+        # Write directly with an old timestamp.
+        old_ts = time.time() - PAIRING_KEY_TTL_SECONDS - 60
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps({
+            "stale-host": {"key_hex": "00" * 32, "ts": old_ts},
+        }))
+        self.assertIsNone(self.store.load_if_fresh("stale-host"))
+
+    def test_forget_clears_just_one_entry(self):
+        self.store.save("a", b"\xaa" * 32)
+        self.store.save("b", b"\xbb" * 32)
+        self.store.forget("a")
+        self.assertIsNone(self.store.load_if_fresh("a"))
+        self.assertEqual(self.store.load_if_fresh("b"), b"\xbb" * 32)
+
+    def test_save_uses_restrictive_file_permissions(self):
+        if os.name != "posix":
+            self.skipTest("POSIX permission semantics only")
+        self.store.save("p", b"\x00" * 32)
+        mode = os.stat(self.path).st_mode & 0o777
+        self.assertEqual(mode, 0o600,
+                         f"pairing.json should be owner-read/write only, got {oct(mode)}")
+
+    def test_corrupt_file_yields_empty_result(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text("{not valid json")
+        # Should not raise; just behaves as empty store.
+        self.assertIsNone(self.store.load_if_fresh("anything"))
 
 
 if __name__ == "__main__":

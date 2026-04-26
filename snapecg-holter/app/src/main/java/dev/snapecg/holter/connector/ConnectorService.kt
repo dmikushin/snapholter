@@ -37,19 +37,23 @@ class ConnectorService : Service() {
 
     // --- Pairing / session crypto state (per TCP session) ---
     // Pairing protocol (matches snapecg-connector/protocol.py):
-    //   1. On every accepted TCP session we generate a fresh 6-digit code,
-    //      log it (PAIRING_CODE=NNNNNN), and require the user to type it
-    //      into the PC connector.
-    //   2. PC sends `pair` request with salt + proof = HMAC-SHA256(code, salt).
-    //   3. We verify the HMAC in constant time. On match we derive a
-    //      session key (PBKDF2-HMAC-SHA256, 100k iters, 32 bytes) which is
-    //      the same key the PC derives — used by the next commit for AES-GCM.
-    //   4. Until `paired` flips true, every non-`pair` RPC method is
-    //      rejected with `{error: "not paired"}`.
+    //   - Fresh pair: phone generates a 6-digit code (logged as
+    //     PAIRING_CODE=NNNNNN), PC sends `pair` with proof = HMAC-SHA256(
+    //     code, salt). On match we derive sessionKey via PBKDF2 and persist
+    //     it (encrypted, see PairingStore) so a quick reconnect skips
+    //     re-entering the code.
+    //   - Resume: if a key was saved for this peer within MAX_AGE_MS, PC
+    //     sends `resume` with proof = HMAC-SHA256(savedKey, salt). On
+    //     match we restore sessionKey and skip the code prompt.
+    //   - Until paired flips true, every non-{pair, resume} method is
+    //     rejected with {error: "not paired"}.
     private var pendingPairCode: String? = null
     private var paired = false
-    /** Set after successful pair; consumed by AES-GCM in a follow-up commit. */
+    /** Address of the connected PC, used for keying PairingStore. */
+    private var currentPeerAddress: String? = null
+    /** Set after successful pair or resume; consumed for AES-GCM. */
     var sessionKey: ByteArray? = null; private set
+    private val pairingStore by lazy { PairingStore(this) }
 
     // Observable connector state (based on port scan discovery)
     var isConnectorConnected = false; private set
@@ -194,8 +198,9 @@ class ConnectorService : Service() {
         val input = DataInputStream(socket.getInputStream())
         val output = DataOutputStream(socket.getOutputStream())
 
+        val peerIp = socket.inetAddress?.hostAddress ?: "unknown"
         // Fresh pairing state per session — old codes don't carry over.
-        startNewPairingSession()
+        startNewPairingSession(peerIp)
 
         try {
             while (scope.isActive && socket.isConnected) {
@@ -243,11 +248,13 @@ class ConnectorService : Service() {
         val params = request.optJSONObject("params") ?: JSONObject()
 
         val result = try {
-            // Gate: every method except `pair` requires a successful HMAC pair first.
-            if (method != "pair" && !paired) {
+            // Gate: pair and resume are the only methods that can run before
+            // sessionKey is established. Everything else is bounced.
+            if (method != "pair" && method != "resume" && !paired) {
                 JSONObject().put("error", "not paired")
             } else when (method) {
                 "pair" -> handlePair(params)
+                "resume" -> handleResume(params)
                 "holter.get_status" -> handleGetStatus()
                 "holter.get_signal" -> handleGetSignal(params)
                 "holter.get_events" -> handleGetEvents()
@@ -271,16 +278,22 @@ class ConnectorService : Service() {
     // --- Pairing ---
 
     /** Generate a fresh code, reset paired state, log code for the user. */
-    private fun startNewPairingSession() {
+    private fun startNewPairingSession(peerAddress: String) {
+        currentPeerAddress = peerAddress
         pendingPairCode = (100000..999999).random().toString()
         paired = false
         sessionKey = null
         // TODO: surface code in UI/notification. For now: adb logcat -s ConnectorService
         Log.i(TAG, "PAIRING_CODE=$pendingPairCode  (enter on PC connector)")
+        // Heads-up to the PC: a saved key may exist; resume is worth trying first.
+        if (pairingStore.loadIfFresh(peerAddress) != null) {
+            Log.i(TAG, "Saved pairing exists for $peerAddress; PC may attempt resume")
+        }
     }
 
     private fun endPairingSession() {
         pendingPairCode = null
+        currentPeerAddress = null
         paired = false
         sessionKey = null
     }
@@ -303,11 +316,45 @@ class ConnectorService : Service() {
             return JSONObject().put("error", "invalid proof")
         }
 
-        sessionKey = ConnectorCrypto.deriveSessionKey(code, salt)
+        val key = ConnectorCrypto.deriveSessionKey(code, salt)
+        sessionKey = key
         paired = true
         pendingPairCode = null  // one-shot — code can't be reused
-        Log.i(TAG, "Paired successfully (session key derived)")
+        currentPeerAddress?.let { pairingStore.save(it, key) }
+        Log.i(TAG, "Paired successfully (session key derived & persisted)")
         return JSONObject().put("status", "paired")
+    }
+
+    /**
+     * Resume an existing pair using the previously-saved session key for
+     * this peer. PC sends `salt` + proof = HMAC-SHA256(savedKey, salt);
+     * we look up our copy of savedKey and recompute. On match the
+     * sessionKey is restored and AES-GCM resumes — no code re-entry.
+     */
+    private fun handleResume(params: JSONObject): JSONObject {
+        val peer = currentPeerAddress
+            ?: return JSONObject().put("error", "no peer address; reconnect first")
+        val saltHex = params.optString("salt", "")
+        val proofHex = params.optString("proof", "")
+        val salt = ConnectorCrypto.hexToBytes(saltHex)
+            ?: return JSONObject().put("error", "invalid salt")
+        val proof = ConnectorCrypto.hexToBytes(proofHex)
+            ?: return JSONObject().put("error", "invalid proof")
+
+        val saved = pairingStore.loadIfFresh(peer)
+            ?: return JSONObject().put("error", "no saved pairing for this peer; needs_pair")
+
+        val expected = ConnectorCrypto.hmacSha256(saved, salt)
+        if (!java.security.MessageDigest.isEqual(expected, proof)) {
+            Log.w(TAG, "Resume rejected: HMAC mismatch (PC's stored key has drifted)")
+            return JSONObject().put("error", "invalid proof; needs_pair")
+        }
+
+        sessionKey = saved
+        paired = true
+        pendingPairCode = null
+        Log.i(TAG, "Resumed previous pair with $peer (skipped code re-entry)")
+        return JSONObject().put("status", "resumed")
     }
 
     // Thin delegates so callers in this file stay readable; logic is in ConnectorCrypto.
