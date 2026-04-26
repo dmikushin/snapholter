@@ -43,7 +43,9 @@ class HolterService : Service(), DeviceManager.Listener {
 
     private var deviceManager: DeviceManager? = null
     private var wakeLock: PowerManager.WakeLock? = null
-    private var store: RecordingStore? = null
+    /** Shared with ConnectorService so the LAN bridge doesn't open a duplicate
+     *  SQLiteOpenHelper against the same on-disk database. */
+    var store: RecordingStore? = null; private set
     private var sessionId: Long = -1
     private val qrsDetector = QRSDetector()
 

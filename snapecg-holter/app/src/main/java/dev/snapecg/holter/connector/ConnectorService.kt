@@ -56,8 +56,11 @@ class ConnectorService : Service() {
 
     // Reference to HolterService (set by MainActivity or self-bound)
     var holterService: HolterService? = null
-    var store: RecordingStore? = null
     private var holterBound = false
+
+    /** Convenience: the recording-store lives on HolterService so we don't
+     *  need a second SQLiteOpenHelper against the same on-disk database. */
+    private val store: RecordingStore? get() = holterService?.store
 
     private val holterConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -88,7 +91,11 @@ class ConnectorService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        store = RecordingStore(this)
+        // Bind eagerly so RPC handlers always see the same RecordingStore /
+        // live Holter state — no point in this service running otherwise.
+        // HolterService.onCreate is cheap and doesn't start the foreground
+        // until a recording is actually requested.
+        bindToHolterService()
         scope.launch { scanForConnector() }
         Log.i(TAG, "ConnectorService started, scanning for connector")
     }
