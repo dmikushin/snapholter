@@ -311,7 +311,12 @@ class RecordingStore(context: Context) : SQLiteOpenHelper(context, "holter.db", 
                     ?: event.text
             }
 
-            val totalSeconds = (sampleCount / 200).toInt()
+            // Header's `num_data_records` must match the number of records
+            // we'll actually write. We pad the last sub-second's worth of
+            // samples up to a full 200-sample record (see below), so round up.
+            // Otherwise readers stop after `floor` records and silently
+            // truncate the tail — including any annotation that fell into it.
+            val totalSeconds = ((sampleCount + 199) / 200).toInt()
             val writer = EdfWriter(output, patientName, startDate, 200, annotations)
             writer.writeHeader(totalSeconds)
 
