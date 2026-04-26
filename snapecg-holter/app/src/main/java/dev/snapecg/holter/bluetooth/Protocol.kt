@@ -119,26 +119,31 @@ object Protocol {
 
 /**
  * Reassembles byte stream into complete protocol packets.
+ *
+ * Buffer is an ArrayDeque so head removal is O(1) — at 200 Hz with ~7 bytes
+ * per packet the previous mutableListOf<Byte>.removeAt(0) implementation
+ * was O(n²) per second of data, which became measurable on long Holter
+ * recordings.
  */
 class StreamParser {
-    private val buffer = mutableListOf<Byte>()
+    private val buffer = ArrayDeque<Byte>()
 
     data class Packet(val type: Int, val raw: ByteArray, val offset: Int)
 
     fun reset() { buffer.clear() }
 
     fun feed(data: ByteArray, length: Int = data.size): List<Packet> {
-        for (i in 0 until length) buffer.add(data[i])
+        for (i in 0 until length) buffer.addLast(data[i])
         val packets = mutableListOf<Packet>()
 
         while (buffer.size >= 4) {
             val hdrIdx = buffer.indexOf(Protocol.HEADER)
             if (hdrIdx < 0) { buffer.clear(); break }
-            if (hdrIdx > 0) { repeat(hdrIdx) { buffer.removeAt(0) } }
+            if (hdrIdx > 0) { repeat(hdrIdx) { buffer.removeFirst() } }
             if (buffer.size < 4) break
 
             val pktLen = buffer[1].toInt() and 0xFF
-            if (pktLen == 0 || pktLen == 0xFF) { buffer.removeAt(0); continue }
+            if (pktLen == 0 || pktLen == 0xFF) { buffer.removeFirst(); continue }
 
             val total = pktLen + 2
             if (buffer.size < total) break
@@ -146,7 +151,7 @@ class StreamParser {
             val pktType = buffer[2].toInt() and 0xFF
             val raw = ByteArray(total) { buffer[it] }
             packets.add(Packet(pktType, raw, 1))
-            repeat(total) { buffer.removeAt(0) }
+            repeat(total) { buffer.removeFirst() }
         }
         return packets
     }
