@@ -19,6 +19,7 @@ import dev.snapecg.holter.bluetooth.DeviceManager
 import dev.snapecg.holter.connector.ConnectorService
 import dev.snapecg.holter.recording.HolterService
 import dev.snapecg.holter.recording.RecordingStore
+import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
@@ -35,7 +36,7 @@ class MainActivity : AppCompatActivity() {
         private const val BT_ADDRESS = "34:81:F4:1C:3F:C1"
     }
 
-    private var state = UiState.SCANNING_CONNECTOR
+    private var state = UiState.HOME
     private var holterService: HolterService? = null
     private var connectorService: ConnectorService? = null
     private var holterBound = false
@@ -404,7 +405,7 @@ class MainActivity : AppCompatActivity() {
         val h = elapsed / 3600
         val m = (elapsed % 3600) / 60
         val s = elapsed % 60
-        return String.format("%d:%02d:%02d", h, m, s)
+        return String.format(Locale.US, "%d:%02d:%02d", h, m, s)
     }
 
     private fun openRecordingsFolder() {
@@ -517,7 +518,7 @@ class MainActivity : AppCompatActivity() {
         val h = elapsed / 3600
         val m = (elapsed % 3600) / 60
         val s = elapsed % 60
-        durationText.text = String.format("%d:%02d:%02d", h, m, s)
+        durationText.text = String.format(Locale.US, "%d:%02d:%02d", h, m, s)
         samplesText.text = "${svc.sampleCount} samples"
         btStateText.text = when (svc.btState) {
             DeviceManager.State.CONNECTED -> "BT: Connected"

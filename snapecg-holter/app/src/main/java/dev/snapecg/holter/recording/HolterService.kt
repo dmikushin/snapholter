@@ -291,7 +291,7 @@ class HolterService : Service(), DeviceManager.Listener {
         val hours = elapsed / 3600
         val mins = (elapsed % 3600) / 60
         val statusText = buildString {
-            append(String.format("%dh %02dm", hours, mins))
+            append(String.format(Locale.US, "%dh %02dm", hours, mins))
             if (lastHr > 0) append(" | HR: $lastHr")
             if (battery >= 0) append(" | Bat: $battery/3")
             if (leadOff) append(" | ⚠ LEAD OFF")
