@@ -47,3 +47,21 @@ docker build -t snapecg-holter .
 - `reports/tests/testDebugUnitTest/index.html` — HTML-отчёт по unit-тестам
 - `build.log` — полный лог Gradle
 
+## Запуск в эмуляторе
+
+`snapecg-holter/emulator.sh` — обёртка над Android SDK + AVD + adb для локальной разработки. Не требует ничего кроме хоста с `/dev/kvm` (Linux KVM-acceleration).
+
+Один раз поднять SDK + system-image + AVD (~3 ГБ скачивается в `~/.local/share/snapecg-android-sdk/`):
+```bash
+./emulator.sh setup
+```
+
+Дальше — обычный цикл «собрать + залить + посмотреть логи»:
+```bash
+./emulator.sh deploy   # build → start → install → launch
+./emulator.sh logcat   # tail app-related тегов
+./emulator.sh stop     # когда закончил
+```
+
+Подкоманды: `setup`, `start`, `stop`, `status`, `build`, `deploy`, `logcat`, `wipe`. Конфигурация через env: `SNAPECG_API_LEVEL`, `SNAPECG_ABI` (для Apple silicon → `arm64-v8a`), `SNAPECG_HEADLESS=1` для CI.
+
