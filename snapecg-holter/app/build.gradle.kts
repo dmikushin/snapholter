@@ -53,6 +53,16 @@ android {
         jvmTarget = "17"
     }
 
+    buildFeatures {
+        compose = true
+    }
+
+    composeOptions {
+        // Compose Compiler version compatible with Kotlin 1.9.22 — see
+        // https://developer.android.com/jetpack/androidx/releases/compose-kotlin
+        kotlinCompilerExtensionVersion = "1.5.10"
+    }
+
     testOptions {
         unitTests.isReturnDefaultValues = true
     }
@@ -67,6 +77,18 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     // Encrypted SharedPreferences for the session-resume key store
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+
+    // Jetpack Compose: BOM keeps every Compose artifact on the same release
+    // train, so individual modules don't need pinned versions.
+    val composeBom = platform("androidx.compose:compose-bom:2024.02.02")
+    implementation(composeBom)
+    androidTestImplementation(composeBom)
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.activity:activity-compose:1.8.2")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.7.0")
+    debugImplementation("androidx.compose.ui:ui-tooling")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20231013")
