@@ -1,5 +1,9 @@
 package dev.snapecg.holter.connector
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.ComponentName
 import android.content.Context
@@ -9,8 +13,10 @@ import android.net.wifi.WifiManager
 import android.os.Binder
 import android.os.IBinder
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import dev.snapecg.holter.recording.HolterService
 import dev.snapecg.holter.recording.RecordingStore
+import dev.snapecg.holter.ui.MainActivity
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -30,6 +36,8 @@ class ConnectorService : Service() {
     companion object {
         private const val TAG = "ConnectorService"
         private const val PORT = 8365
+        private const val PAIR_CHANNEL_ID = "snapecg_pairing"
+        private const val PAIR_NOTIFICATION_ID = 2  // 1 is HolterService recording
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -96,6 +104,7 @@ class ConnectorService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        createPairingNotificationChannel()
         // Bind eagerly so RPC handlers always see the same RecordingStore /
         // live Holter state — no point in this service running otherwise.
         // HolterService.onCreate is cheap and doesn't start the foreground
@@ -112,6 +121,7 @@ class ConnectorService : Service() {
             holterBound = false
         }
         clientSocket?.close()
+        cancelPairingNotification()
         super.onDestroy()
     }
 
@@ -280,15 +290,16 @@ class ConnectorService : Service() {
     /** Generate a fresh code, reset paired state, log code for the user. */
     private fun startNewPairingSession(peerAddress: String) {
         currentPeerAddress = peerAddress
-        pendingPairCode = (100000..999999).random().toString()
+        val code = (100000..999999).random().toString()
+        pendingPairCode = code
         paired = false
         sessionKey = null
-        // TODO: surface code in UI/notification. For now: adb logcat -s ConnectorService
-        Log.i(TAG, "PAIRING_CODE=$pendingPairCode  (enter on PC connector)")
+        Log.i(TAG, "PAIRING_CODE=$code  (enter on PC connector)")
         // Heads-up to the PC: a saved key may exist; resume is worth trying first.
         if (pairingStore.loadIfFresh(peerAddress) != null) {
             Log.i(TAG, "Saved pairing exists for $peerAddress; PC may attempt resume")
         }
+        showPairingNotification(code, peerAddress)
     }
 
     private fun endPairingSession() {
@@ -296,6 +307,7 @@ class ConnectorService : Service() {
         currentPeerAddress = null
         paired = false
         sessionKey = null
+        cancelPairingNotification()
     }
 
     private fun handlePair(params: JSONObject): JSONObject {
@@ -321,6 +333,7 @@ class ConnectorService : Service() {
         paired = true
         pendingPairCode = null  // one-shot — code can't be reused
         currentPeerAddress?.let { pairingStore.save(it, key) }
+        cancelPairingNotification()
         Log.i(TAG, "Paired successfully (session key derived & persisted)")
         return JSONObject().put("status", "paired")
     }
@@ -353,8 +366,66 @@ class ConnectorService : Service() {
         sessionKey = saved
         paired = true
         pendingPairCode = null
+        cancelPairingNotification()
         Log.i(TAG, "Resumed previous pair with $peer (skipped code re-entry)")
         return JSONObject().put("status", "resumed")
+    }
+
+    // --- Pairing notification ---
+    //
+    // The pairing code is a per-session secret the user must read off the
+    // phone and type into the PC connector. Without UI it lived only in
+    // adb logcat, which is invisible to a normal user. A high-importance
+    // notification surfaces it without requiring the app to be foregrounded.
+
+    private fun createPairingNotificationChannel() {
+        val channel = NotificationChannel(
+            PAIR_CHANNEL_ID, "Pairing prompts",
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            description = "Shows the 6-digit code to type into the PC connector"
+            setShowBadge(true)
+        }
+        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+            .createNotificationChannel(channel)
+    }
+
+    private fun showPairingNotification(code: String, peerAddress: String) {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pending = PendingIntent.getActivity(
+            this, 0, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val notif: Notification = NotificationCompat.Builder(this, PAIR_CHANNEL_ID)
+            .setContentTitle("SnapECG pairing code")
+            .setContentText("$code  —  type on PC ($peerAddress)")
+            .setStyle(NotificationCompat.BigTextStyle().bigText(
+                "Code: $code\n\nType this on the PC running snapecg-connector " +
+                "(asking for it via --pair). Connector at $peerAddress."
+            ))
+            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setContentIntent(pending)
+            .setAutoCancel(false)
+            .setOngoing(true)
+            .build()
+        try {
+            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+                .notify(PAIR_NOTIFICATION_ID, notif)
+        } catch (e: SecurityException) {
+            // POST_NOTIFICATIONS denied (API 33+). Fall back to log only.
+            Log.w(TAG, "Cannot post pairing notification: ${e.message}")
+        }
+    }
+
+    private fun cancelPairingNotification() {
+        try {
+            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+                .cancel(PAIR_NOTIFICATION_ID)
+        } catch (_: Exception) { /* ignore */ }
     }
 
     // Thin delegates so callers in this file stay readable; logic is in ConnectorCrypto.
