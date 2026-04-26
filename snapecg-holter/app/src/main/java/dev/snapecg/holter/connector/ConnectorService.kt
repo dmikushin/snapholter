@@ -310,7 +310,14 @@ class ConnectorService : Service() {
                 else -> JSONObject().put("error", "unknown method: $method")
             }
         } catch (e: Exception) {
-            JSONObject().put("error", e.message)
+            // e.message can be null (e.g. NullPointerException without an
+            // explicit message) — that would serialize to {"error": null},
+            // useless to the agent on the other end. e.toString() always
+            // gives at least the class name. Log the full stack trace
+            // separately so Studio's logcat shows what actually failed —
+            // otherwise this catch silently swallows it.
+            Log.w(TAG, "RPC handler threw on method=$method", e)
+            JSONObject().put("error", e.message ?: e.toString())
         }
 
         return JSONObject().apply {
