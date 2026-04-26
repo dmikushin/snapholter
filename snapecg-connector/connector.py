@@ -27,7 +27,8 @@ sys.path.insert(0, '../src')
 
 from protocol import (
     CONNECTOR_PORT, PAIRING_CODE_LENGTH, AppConnection, DiscoveryListener,
-    PairingStore, derive_session_key, send_message, recv_message,
+    PairingStore, derive_session_key, format_pairing_code_for_display,
+    is_valid_pairing_code, normalize_pairing_code, send_message, recv_message,
 )
 
 
@@ -171,10 +172,16 @@ class HolterConnector:
 
         # Fresh pair: prompt for code if one wasn't supplied.
         if code is None:
-            code = input("Pairing code from phone (PAIRING_CODE=...): ").strip()
-        if not code or len(code) != PAIRING_CODE_LENGTH or not code.isdigit():
+            raw = input(
+                "Pairing code from phone (XXXX-XXXX-XXXX-XXXX, see notification): "
+            )
+            code = normalize_pairing_code(raw)
+        else:
+            code = normalize_pairing_code(code)
+        if not is_valid_pairing_code(code):
             return {'status': 'failed',
-                    'reason': f'expected {PAIRING_CODE_LENGTH}-digit code'}
+                    'reason': f'expected {PAIRING_CODE_LENGTH} chars from the '
+                              f'pairing alphabet (case-insensitive, hyphens ok)'}
 
         salt = secrets.token_bytes(16)
         proof = hmac.new(code.encode(), salt, 'sha256').hexdigest()

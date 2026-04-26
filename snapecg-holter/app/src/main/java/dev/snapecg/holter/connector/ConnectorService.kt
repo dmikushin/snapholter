@@ -41,6 +41,13 @@ class ConnectorService : Service() {
         private const val PORT = 8365
         private const val PAIR_CHANNEL_ID = "snapecg_pairing"
         private const val PAIR_NOTIFICATION_ID = 2  // 1 is HolterService recording
+
+        // Pairing-code alphabet must match snapecg-connector/protocol.py.
+        // 30 chars × 16 positions = 30**16 ≈ 2**78.6 of entropy, far above
+        // the practical brute-force ceiling so an eavesdropper who captures
+        // {salt, HMAC(code, salt)} cannot recover the code offline.
+        private const val PAIR_ALPHABET = "ABCDEFGHJKMNPQRSTVWXYZ23456789"
+        private const val PAIR_CODE_LENGTH = 16
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -304,10 +311,12 @@ class ConnectorService : Service() {
     /** Generate a fresh code, reset paired state, log code for the user. */
     private fun startNewPairingSession(peerAddress: String) {
         currentPeerAddress = peerAddress
-        val code = (100000..999999).random().toString()
+        val code = generatePairingCode()
         pendingPairCode = code
         paired = false
         sessionKey = null
+        // adb logcat shows the code unformatted (no hyphens) so a paste
+        // straight into the connector works after stripping whitespace.
         Log.i(TAG, "PAIRING_CODE=$code  (enter on PC connector)")
         // Heads-up to the PC: a saved key may exist; resume is worth trying first.
         if (pairingStore.loadIfFresh(peerAddress) != null) {
@@ -315,6 +324,17 @@ class ConnectorService : Service() {
         }
         showPairingNotification(code, peerAddress)
     }
+
+    private fun generatePairingCode(): String {
+        val r = java.security.SecureRandom()
+        return buildString(PAIR_CODE_LENGTH) {
+            repeat(PAIR_CODE_LENGTH) { append(PAIR_ALPHABET[r.nextInt(PAIR_ALPHABET.length)]) }
+        }
+    }
+
+    /** Insert hyphens every 4 chars: ABCDEFGHIJKLMNOP -> ABCD-EFGH-IJKL-MNOP. */
+    private fun formatCodeForDisplay(code: String): String =
+        code.chunked(4).joinToString("-")
 
     private fun endPairingSession() {
         pendingPairCode = null
@@ -405,6 +425,7 @@ class ConnectorService : Service() {
     }
 
     private fun showPairingNotification(code: String, peerAddress: String) {
+        val pretty = formatCodeForDisplay(code)
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
@@ -414,10 +435,11 @@ class ConnectorService : Service() {
         )
         val notif: Notification = NotificationCompat.Builder(this, PAIR_CHANNEL_ID)
             .setContentTitle("SnapECG pairing code")
-            .setContentText("$code  —  type on PC ($peerAddress)")
+            .setContentText("$pretty  —  type on PC ($peerAddress)")
             .setStyle(NotificationCompat.BigTextStyle().bigText(
-                "Code: $code\n\nType this on the PC running snapecg-connector " +
-                "(asking for it via --pair). Connector at $peerAddress."
+                "Code: $pretty\n\nType this on the PC running snapecg-connector " +
+                "(asking for it via --pair). Hyphens are optional. " +
+                "Connector at $peerAddress."
             ))
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setPriority(NotificationCompat.PRIORITY_HIGH)

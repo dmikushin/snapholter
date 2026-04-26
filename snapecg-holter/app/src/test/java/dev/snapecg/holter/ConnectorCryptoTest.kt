@@ -30,12 +30,13 @@ class ConnectorCryptoTest {
     @Test
     fun `hmacSha256 matches Python reference for known pair vector`() {
         // Same inputs we use in the Python interop test:
-        //   code="123456", salt=00112233445566778899aabbccddeeff
+        //   code="XK4P9VR2J7TMQH3W" (16 chars from the high-entropy alphabet),
+        //   salt=00112233445566778899aabbccddeeff,
         //   proof = HMAC-SHA256(code, salt)
-        val code = "123456".toByteArray(Charsets.UTF_8)
+        val code = "XK4P9VR2J7TMQH3W".toByteArray(Charsets.UTF_8)
         val salt = ConnectorCrypto.hexToBytes("00112233445566778899aabbccddeeff")!!
-        val expected = "659eecc469be2ed876992f478a9d939c" +
-                "1f0b281f68d6445e9352b154eae58e14"
+        val expected = "b6325a957950828127e023cce3492f32" +
+                "fe8051d37ed969397dce3e3ca9fdc653"
         assertEquals(expected, ConnectorCrypto.hmacSha256(code, salt).toHex())
     }
 
@@ -84,12 +85,12 @@ class ConnectorCryptoTest {
 
     @Test
     fun `deriveSessionKey matches Python reference vector`() {
-        // Python: hashlib.pbkdf2_hmac('sha256', b'123456',
+        // Python: hashlib.pbkdf2_hmac('sha256', b'XK4P9VR2J7TMQH3W',
         //   bytes.fromhex('00112233445566778899aabbccddeeff'), 100000, dklen=32)
         val salt = ConnectorCrypto.hexToBytes("00112233445566778899aabbccddeeff")!!
-        val expected = "1d44f879854c5e777dd01c8275d58b1e" +
-                "976e7038ae2860fd82d69d1d2f3d610b"
-        val actual = ConnectorCrypto.deriveSessionKey("123456", salt).toHex()
+        val expected = "21a0bde826116e3dd56caf15501358a9" +
+                "54fc337f77831b36ffdc8428f6fd6175"
+        val actual = ConnectorCrypto.deriveSessionKey("XK4P9VR2J7TMQH3W", salt).toHex()
         assertEquals(expected, actual)
     }
 

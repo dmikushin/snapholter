@@ -30,9 +30,13 @@ from cryptography.exceptions import InvalidTag
 from protocol import (
     AESGCM,
     GCM_NONCE_BYTES,
+    PAIRING_CODE_ALPHABET,
     PAIRING_CODE_LENGTH,
     PAIRING_KEY_TTL_SECONDS,
     PairingStore,
+    format_pairing_code_for_display,
+    is_valid_pairing_code,
+    normalize_pairing_code,
     send_message,
     recv_message,
 )
@@ -42,16 +46,19 @@ from protocol import (
 # Shared interop test vectors (must match ConnectorCryptoTest.kt byte-for-byte)
 # ---------------------------------------------------------------------------
 
-VECTOR_CODE = "123456"
+# 16-char pairing code from the new high-entropy alphabet (replacing the
+# previous 6-digit "123456"). Both Kotlin and Python tests pin these
+# expected outputs so any drift breaks both suites simultaneously.
+VECTOR_CODE = "XK4P9VR2J7TMQH3W"
 VECTOR_SALT_HEX = "00112233445566778899aabbccddeeff"
 VECTOR_SALT = bytes.fromhex(VECTOR_SALT_HEX)
 VECTOR_PROOF_HEX = (
-    "659eecc469be2ed876992f478a9d939c"
-    "1f0b281f68d6445e9352b154eae58e14"
+    "b6325a957950828127e023cce3492f32"
+    "fe8051d37ed969397dce3e3ca9fdc653"
 )
 VECTOR_SESSION_KEY_HEX = (
-    "1d44f879854c5e777dd01c8275d58b1e"
-    "976e7038ae2860fd82d69d1d2f3d610b"
+    "21a0bde826116e3dd56caf15501358a9"
+    "54fc337f77831b36ffdc8428f6fd6175"
 )
 
 
@@ -105,7 +112,7 @@ class PairingVectorsTest(unittest.TestCase):
         self.assertEqual(key.hex(), VECTOR_SESSION_KEY_HEX)
 
     def test_pairing_code_length_constant(self):
-        self.assertEqual(PAIRING_CODE_LENGTH, 6)
+        self.assertEqual(PAIRING_CODE_LENGTH, 16)
 
 
 class FramingPlaintextTest(unittest.TestCase):
@@ -271,6 +278,55 @@ class PairingStorePersistenceTest(unittest.TestCase):
         self.path.write_text("{not valid json")
         # Should not raise; just behaves as empty store.
         self.assertIsNone(self.store.load_if_fresh("anything"))
+
+
+class PairingCodeFormatTest(unittest.TestCase):
+    """High-entropy pairing-code normalization, formatting, and validation."""
+
+    def test_alphabet_is_30_unambiguous_chars(self):
+        # No 0/O, no 1/I/L, no U.
+        self.assertEqual(len(PAIRING_CODE_ALPHABET), 30)
+        for forbidden in "0O1ILU":
+            self.assertNotIn(forbidden, PAIRING_CODE_ALPHABET,
+                             f"alphabet should not contain '{forbidden}'")
+        # All upper-case alphanumeric.
+        self.assertTrue(PAIRING_CODE_ALPHABET.isalnum())
+        self.assertEqual(PAIRING_CODE_ALPHABET, PAIRING_CODE_ALPHABET.upper())
+
+    def test_normalize_strips_hyphens_and_uppercases(self):
+        self.assertEqual(normalize_pairing_code("xk4p-9vr2-j7tm-qh3w"),
+                         "XK4P9VR2J7TMQH3W")
+        self.assertEqual(normalize_pairing_code("  xk4p 9vr2  "),
+                         "XK4P9VR2")
+        self.assertEqual(normalize_pairing_code("XK4P\t9VR2\nJ7TMQH3W"),
+                         "XK4P9VR2J7TMQH3W")
+
+    def test_format_inserts_hyphens_every_4_chars(self):
+        self.assertEqual(format_pairing_code_for_display("XK4P9VR2J7TMQH3W"),
+                         "XK4P-9VR2-J7TM-QH3W")
+
+    def test_is_valid_accepts_known_vector(self):
+        self.assertTrue(is_valid_pairing_code(VECTOR_CODE))
+
+    def test_is_valid_rejects_wrong_length(self):
+        self.assertFalse(is_valid_pairing_code("XK4P9VR2"))            # too short
+        self.assertFalse(is_valid_pairing_code("XK4P9VR2J7TMQH3WX"))   # too long
+
+    def test_is_valid_rejects_chars_outside_alphabet(self):
+        self.assertFalse(is_valid_pairing_code("XK4P9VR2J7TMQH3O"))    # O
+        self.assertFalse(is_valid_pairing_code("XK4P9VR2J7TMQH31"))    # 1
+        self.assertFalse(is_valid_pairing_code("XK4P9VR2J7TMQH3L"))    # L
+
+    def test_is_valid_rejects_lowercase(self):
+        # Caller is expected to normalize() first; raw lowercase fails.
+        self.assertFalse(is_valid_pairing_code("xk4p9vr2j7tmqh3w"))
+
+    def test_entropy_envelope(self):
+        # 30**16 must exceed 2**78 — sanity-check the entropy claim in the
+        # commit message and the docstring.
+        import math
+        bits = 16 * math.log2(30)
+        self.assertGreater(bits, 78)
 
 
 if __name__ == "__main__":

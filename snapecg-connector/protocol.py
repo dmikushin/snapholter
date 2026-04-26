@@ -36,11 +36,34 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 CONNECTOR_PORT = 8365
 DISCOVERY_PORT = 8365
 PROTOCOL_VERSION = "1.0"
-PAIRING_CODE_LENGTH = 6
+# Pairing-code alphabet and length. We use a 30-char alphabet that drops
+# the visually-confusable 0/O, 1/I/L, and U (commonly mistyped as V).
+# 16 chars => 30**16 ≈ 2**78.6 entropy, infeasible to offline-brute-force
+# from a captured {salt, HMAC(code, salt)} tuple. The previous 6-digit
+# codes (10**6 ≈ 2**20) collapsed in < 1 s on a laptop.
+PAIRING_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTVWXYZ23456789"  # 30 chars
+PAIRING_CODE_LENGTH = 16
 DISCOVERY_MAGIC = b"SNAPECG_DISCOVER"
 DISCOVERY_INTERVAL = 2.0  # seconds between broadcasts
 GCM_NONCE_BYTES = 12       # 96-bit nonce per NIST SP 800-38D
 PAIRING_KEY_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days, matches Android PairingStore
+
+
+def normalize_pairing_code(s: str) -> str:
+    """Strip whitespace + hyphens, uppercase. Lets the user type the
+    code with the visual grouping (XXXX-XXXX-XXXX-XXXX) we display."""
+    return "".join(c for c in s.upper() if c.isalnum())
+
+
+def is_valid_pairing_code(code: str) -> bool:
+    if len(code) != PAIRING_CODE_LENGTH:
+        return False
+    return all(c in PAIRING_CODE_ALPHABET for c in code)
+
+
+def format_pairing_code_for_display(code: str) -> str:
+    """Insert hyphens every 4 chars: 'ABCDEFGH...' -> 'ABCD-EFGH-...'."""
+    return "-".join(code[i:i + 4] for i in range(0, len(code), 4))
 
 
 # --- Pairing persistence (PC side) ---
