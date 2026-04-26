@@ -240,14 +240,26 @@ class CrossLanguageInteropTest(unittest.TestCase):
 
 
 class PairingStorePersistenceTest(unittest.TestCase):
-    """PairingStore round-trip, TTL expiry, peer isolation, mode-0600 perms."""
+    """PairingStore round-trip, TTL expiry, peer isolation, mode-0600 perms.
+
+    These tests force the file fallback path: the OS keyring is patched
+    out so saves write to the metadata file directly. That keeps the
+    suite hermetic — touching the real Secret Service / Keychain would
+    leave per-run cruft on the developer machine.
+    """
 
     def setUp(self):
+        import protocol
+        # Save & disable the keyring path for the duration of each test.
+        self._saved_has_keyring = protocol._HAS_KEYRING
+        protocol._HAS_KEYRING = False
         self.tmpdir = tempfile.TemporaryDirectory()
         self.path = Path(self.tmpdir.name) / "pairing.json"
         self.store = PairingStore(self.path)
 
     def tearDown(self):
+        import protocol
+        protocol._HAS_KEYRING = self._saved_has_keyring
         self.tmpdir.cleanup()
 
     def test_save_then_load_roundtrip(self):
@@ -294,6 +306,66 @@ class PairingStorePersistenceTest(unittest.TestCase):
         self.path.write_text("{not valid json")
         # Should not raise; just behaves as empty store.
         self.assertIsNone(self.store.load_if_fresh("anything"))
+
+
+class PairingStoreKeyringPathTest(unittest.TestCase):
+    """Verify the keyring-backed save/load path with a stubbed backend.
+
+    We patch protocol._keyring with an in-memory dict so the test stays
+    hermetic — no actual Secret Service / Keychain interaction.
+    """
+
+    def setUp(self):
+        import protocol
+        self._saved_has_keyring = protocol._HAS_KEYRING
+        self._saved_keyring = getattr(protocol, "_keyring", None)
+        # Stub keyring to an in-memory dict.
+        self._kr_state: dict[tuple[str, str], str] = {}
+        class _StubKeyring:
+            @staticmethod
+            def set_password(service, account, value):
+                self._kr_state[(service, account)] = value
+            @staticmethod
+            def get_password(service, account):
+                return self._kr_state.get((service, account))
+            @staticmethod
+            def delete_password(service, account):
+                self._kr_state.pop((service, account), None)
+        protocol._keyring = _StubKeyring  # type: ignore[attr-defined]
+        protocol._HAS_KEYRING = True
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmpdir.name) / "pairing.json"
+        self.store = PairingStore(self.path)
+
+    def tearDown(self):
+        import protocol
+        protocol._HAS_KEYRING = self._saved_has_keyring
+        if self._saved_keyring is not None:
+            protocol._keyring = self._saved_keyring  # type: ignore[attr-defined]
+        self.tmpdir.cleanup()
+
+    def test_save_uses_keyring_when_available(self):
+        key = bytes.fromhex(VECTOR_SESSION_KEY_HEX)
+        self.store.save("192.168.1.42", key)
+        # Key landed in the keyring; metadata file does NOT contain key_hex.
+        self.assertEqual(
+            self._kr_state.get(("snapecg-connector", "192.168.1.42")),
+            key.hex(),
+        )
+        meta = json.loads(self.path.read_text())
+        self.assertNotIn("key_hex", meta["192.168.1.42"])
+        self.assertEqual(meta["192.168.1.42"]["where"], "keyring")
+
+    def test_load_round_trips_via_keyring(self):
+        key = bytes.fromhex(VECTOR_SESSION_KEY_HEX)
+        self.store.save("a-host", key)
+        self.assertEqual(self.store.load_if_fresh("a-host"), key)
+
+    def test_forget_removes_from_keyring_and_metadata(self):
+        self.store.save("a-host", b"\x11" * 32)
+        self.store.forget("a-host")
+        self.assertNotIn(("snapecg-connector", "a-host"), self._kr_state)
+        self.assertIsNone(self.store.load_if_fresh("a-host"))
 
 
 class PairingCodeFormatTest(unittest.TestCase):

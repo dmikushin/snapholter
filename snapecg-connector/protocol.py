@@ -74,15 +74,43 @@ def format_pairing_code_for_display(code: str) -> str:
 
 # --- Pairing persistence (PC side) ---
 
-class PairingStore:
-    """Plain JSON file at ~/.config/snapecg/pairing.json mapping peer
-    address (the phone's IP) to {key_hex, ts}.
+# Optional dependency: python-keyring. When available we store the AES-GCM
+# session key in the OS keyring (Secret Service / Keychain / Credential
+# Manager) so it lives encrypted at rest behind the user's login session.
+# When unavailable we transparently fall back to the JSON file with mode
+# 0600 — fine on a single-user laptop, vulnerable to live-USB / single-
+# user-mode disk reads on a multi-user / clinical workstation.
+try:
+    import keyring as _keyring  # noqa: F401
+    from keyring.errors import KeyringError as _KeyringError  # noqa: F401
+    _HAS_KEYRING = True
+except Exception:  # pragma: no cover — exercised only when the dep is absent
+    _HAS_KEYRING = False
+    _KeyringError = Exception  # type: ignore[assignment, misc]
 
-    Mirrors the Android-side EncryptedSharedPreferences PairingStore so
-    a quick reconnect can `resume` instead of forcing a code re-entry.
-    No crypto on the file itself — protect it with file-system perms
-    (mode 0600). Treat its contents as session keys: if the file leaks,
-    rotate by deleting it (next pair will issue a new key).
+
+_KEYRING_SERVICE = "snapecg-connector"
+
+
+class PairingStore:
+    """Per-peer session-key store, mirroring the Android-side PairingStore.
+
+    Storage strategy:
+      1. **OS keyring (preferred)**: under service name "snapecg-connector",
+         account is the phone IP, value is the hex session key. The
+         metadata file at ~/.config/snapecg/pairing.json still records
+         {address: ts} so we can apply the 7-day TTL without unlocking
+         the keyring on every request.
+      2. **Plain JSON fallback**: when python-keyring is missing OR the
+         backend rejects the write (e.g. headless server with no
+         secret-service daemon), we write {address: {key_hex, ts}} to
+         the same JSON file at mode 0600. A warning is printed at first
+         save so the operator knows their session keys are at rest in
+         plaintext.
+
+    Either way, callers see the same .save() / .load_if_fresh() / .forget()
+    API. A quick reconnect hits keyring (or fallback file) and skips the
+    code re-entry.
     """
 
     def __init__(self, path: Path | None = None):
@@ -90,8 +118,13 @@ class PairingStore:
             Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
             / "snapecg" / "pairing.json"
         )
+        # Tracks whether we've already warned about plaintext fallback so we
+        # don't spam the operator on every save.
+        self._fallback_warned = False
 
-    def _load(self) -> dict:
+    # ---- Internal helpers ----------------------------------------------
+
+    def _load_metadata(self) -> dict:
         if not self.path.exists():
             return {}
         try:
@@ -99,7 +132,7 @@ class PairingStore:
         except (OSError, json.JSONDecodeError):
             return {}
 
-    def _save(self, data: dict):
+    def _save_metadata(self, data: dict):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(data, indent=2))
         try:
@@ -107,29 +140,89 @@ class PairingStore:
         except OSError:
             pass
 
+    def _keyring_save(self, peer_address: str, key_hex: str) -> bool:
+        """Store the key in the OS keyring. Returns True on success."""
+        if not _HAS_KEYRING:
+            return False
+        try:
+            _keyring.set_password(_KEYRING_SERVICE, peer_address, key_hex)
+            return True
+        except (_KeyringError, Exception):  # be conservative
+            return False
+
+    def _keyring_load(self, peer_address: str) -> bytes | None:
+        if not _HAS_KEYRING:
+            return None
+        try:
+            hexv = _keyring.get_password(_KEYRING_SERVICE, peer_address)
+        except (_KeyringError, Exception):
+            return None
+        if not hexv:
+            return None
+        try:
+            return bytes.fromhex(hexv)
+        except ValueError:
+            return None
+
+    def _keyring_delete(self, peer_address: str):
+        if not _HAS_KEYRING:
+            return
+        try:
+            _keyring.delete_password(_KEYRING_SERVICE, peer_address)
+        except (_KeyringError, Exception):
+            pass
+
+    # ---- Public API -----------------------------------------------------
+
     def save(self, peer_address: str, session_key: bytes):
-        data = self._load()
-        data[peer_address] = {
-            "key_hex": session_key.hex(),
-            "ts": time.time(),
-        }
-        self._save(data)
+        """Persist the (peer_address, session_key) tuple. Stores the key in
+        the OS keyring when available; falls back to the metadata file."""
+        meta = self._load_metadata()
+        # Wipe stale fallback entry so we never have a plaintext copy AND a
+        # keyring copy disagreeing about the value.
+        meta.pop(peer_address, None)
+
+        if self._keyring_save(peer_address, session_key.hex()):
+            meta[peer_address] = {"ts": time.time(), "where": "keyring"}
+        else:
+            if not self._fallback_warned:
+                import sys as _sys
+                _sys.stderr.write(
+                    "snapecg PairingStore: OS keyring unavailable, falling "
+                    "back to plaintext file at " + str(self.path) +
+                    " (mode 0600). Install python-keyring + a Secret Service "
+                    "backend for at-rest encryption.\n"
+                )
+                self._fallback_warned = True
+            meta[peer_address] = {
+                "key_hex": session_key.hex(),
+                "ts": time.time(),
+                "where": "file",
+            }
+
+        self._save_metadata(meta)
 
     def load_if_fresh(self, peer_address: str) -> bytes | None:
-        entry = self._load().get(peer_address)
+        entry = self._load_metadata().get(peer_address)
         if not entry:
             return None
         if time.time() - entry.get("ts", 0) > PAIRING_KEY_TTL_SECONDS:
             return None
+        if entry.get("where") == "keyring":
+            return self._keyring_load(peer_address)
+        # Legacy or fallback entry: read from the metadata file.
         try:
             return bytes.fromhex(entry["key_hex"])
         except (KeyError, ValueError):
             return None
 
     def forget(self, peer_address: str):
-        data = self._load()
-        data.pop(peer_address, None)
-        self._save(data)
+        """Remove both the keyring entry and the metadata so the next
+        connect from this peer falls back to fresh pair."""
+        self._keyring_delete(peer_address)
+        meta = self._load_metadata()
+        meta.pop(peer_address, None)
+        self._save_metadata(meta)
 
 
 # --- Message framing ---

@@ -1,0 +1,10 @@
+# Required: AES-GCM session encryption + HMAC pair proofs.
+cryptography>=41.0
+
+# Optional but strongly recommended: encrypts session keys at rest in
+# the OS keyring (Secret Service / Keychain / Credential Manager). When
+# this package is missing or no keyring backend is configured,
+# PairingStore falls back to a plaintext file at mode 0600 — fine on a
+# single-user laptop, vulnerable to live-USB / single-user-mode reads
+# on a shared / clinical workstation.
+keyring>=24.0
