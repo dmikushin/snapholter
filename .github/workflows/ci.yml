@@ -134,22 +134,25 @@ jobs:
           SIGNING_KEY_ALIAS:      ${{ secrets.SIGNING_KEY_ALIAS }}
           SIGNING_KEY_PASSWORD:   ${{ secrets.SIGNING_KEY_PASSWORD }}
         run: |
-          if [ -n "$SIGNING_KEYSTORE_BASE64" ]; then
-            echo "$SIGNING_KEYSTORE_BASE64" | base64 -d \
-              > snapecg-holter/release.keystore
-            cat > snapecg-holter/app/keystore.properties <<EOF
-          storeFile=release.keystore
-          storePassword=$SIGNING_STORE_PASSWORD
-          keyAlias=$SIGNING_KEY_ALIAS
-          keyPassword=$SIGNING_KEY_PASSWORD
-          EOF
-            echo "signed=true" >> "$GITHUB_OUTPUT"
-            echo "Release signing configured from repo secrets."
-          else
-            echo "signed=false" >> "$GITHUB_OUTPUT"
+          if [ -z "$SIGNING_KEYSTORE_BASE64" ]; then
             echo "No SIGNING_KEYSTORE_BASE64 secret set;"
             echo "release will fall back to debug keystore signing."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          # base64 -d the keystore into the project root.
+          echo "$SIGNING_KEYSTORE_BASE64" | base64 -d > snapecg-holter/release.keystore
+          # Write keystore.properties with printf — heredocs are awkward to
+          # indent inside YAML run blocks. build.gradle.kts looks for this
+          # file at app/keystore.properties; it's gitignored.
+          {
+            printf 'storeFile=release.keystore\n'
+            printf 'storePassword=%s\n' "$SIGNING_STORE_PASSWORD"
+            printf 'keyAlias=%s\n'      "$SIGNING_KEY_ALIAS"
+            printf 'keyPassword=%s\n'   "$SIGNING_KEY_PASSWORD"
+          } > snapecg-holter/app/keystore.properties
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+          echo "Release signing configured from repo secrets."
 
       - name: Compute version
         id: version
