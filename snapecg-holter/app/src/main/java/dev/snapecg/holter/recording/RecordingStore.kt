@@ -299,22 +299,16 @@ class RecordingStore(context: Context) : SQLiteOpenHelper(context, "holter.db", 
 
             val output = context.contentResolver.openOutputStream(uri) ?: return null
 
-            // Load events and build annotation map (second index -> note text)
+            // Load events and build annotation map (record index -> note text).
+            // Onset time is encoded by EdfWriter via the per-record time-keeping TAL,
+            // so the text needs only the note content itself.
             val events = getEvents(resolved)
             val annotations = mutableMapOf<Int, String>()
             for (event in events) {
                 val secondIdx = (event.sampleIndex / 200).toInt()
-                val elapsed = event.sampleIndex / 200
-                val h = elapsed / 3600
-                val m = (elapsed % 3600) / 60
-                val s = elapsed % 60
-                val tsPart = "${h}:${"%02d".format(m)}:${"%02d".format(s)}"
-                val note = "[$tsPart] ${event.text}"
-                annotations[secondIdx] = if (secondIdx in annotations) {
-                    annotations[secondIdx] + " | $note"
-                } else {
-                    note
-                }
+                annotations[secondIdx] = annotations[secondIdx]
+                    ?.let { "$it | ${event.text}" }
+                    ?: event.text
             }
 
             val totalSeconds = (sampleCount / 200).toInt()
@@ -329,7 +323,6 @@ class RecordingStore(context: Context) : SQLiteOpenHelper(context, "holter.db", 
             )
 
             val sampleBuf = mutableListOf<Int>()
-            var recordIndex = 0
             chunkCursor.use { cc ->
                 while (cc.moveToNext()) {
                     val blob = cc.getBlob(0)
@@ -341,17 +334,14 @@ class RecordingStore(context: Context) : SQLiteOpenHelper(context, "holter.db", 
                     // Flush complete 1-second records
                     while (sampleBuf.size >= 200) {
                         val record = IntArray(200) { sampleBuf.removeAt(0) }
-                        val ann = annotations[recordIndex] ?: ""
-                        writer.writeDataRecord(record, ann)
-                        recordIndex++
+                        writer.writeDataRecord(record)
                     }
                 }
             }
             // Pad remaining samples to a full record
             if (sampleBuf.isNotEmpty()) {
                 while (sampleBuf.size < 200) sampleBuf.add(0)
-                val ann = annotations[recordIndex] ?: ""
-                writer.writeDataRecord(IntArray(200) { sampleBuf[it] }, ann)
+                writer.writeDataRecord(IntArray(200) { sampleBuf[it] })
             }
 
             writer.close()

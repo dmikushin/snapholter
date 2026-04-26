@@ -9,43 +9,56 @@ import java.util.*
 /**
  * Minimal EDF+ writer for single-channel ECG with optional annotations.
  *
- * Spec: https://www.edfplus.info/specs/edf.html
- * - Signal 1: ECG, 200 samples/data record (16-bit signed)
- * - Signal 2 (optional): EDF Annotations, N bytes per record
+ * Spec: https://www.edfplus.info/specs/edfplus.html
+ * - Signal 1: ECG, sampleRate samples/data record (16-bit signed)
+ * - Signal 2 (optional): EDF Annotations, Ns int16 = 2*Ns bytes per record
  * - Physical dimension: uV (raw ADC units mapped 1:1)
+ *
+ * EDF+ TAL format (per spec section 2.2):
+ *   Onset[\x15Duration]\x14Annotation\x14\x00
+ *
+ * Each data record begins with a "time-keeping" TAL "+<n>\x14\x14\x00" that
+ * names the record's start time in seconds since file start. User annotations
+ * follow as additional TALs in the same record.
  */
 class EdfWriter(
     private val output: OutputStream,
     private val patientName: String = "",
     private val startTime: Date,
     private val sampleRate: Int = 200,
-    annotations: Map<Int, String> = emptyMap(),  // data record index -> note text
+    private val annotations: Map<Int, String> = emptyMap(),  // record index -> note text
 ) {
     companion object {
         private const val DIGITAL_MIN = -2048
         private const val DIGITAL_MAX = 2047
         private const val PHYSICAL_MIN = -2048
         private const val PHYSICAL_MAX = 2047
+        // "+<n>\x14\x14\x00" — 24 bytes covers any plausible record index.
+        private const val TIMEKEEPING_MAX_BYTES = 24
     }
 
-    private val annBytesPerRecord: Int
-    private val numSignals: Int
-    private val headerSize: Int
+    private val hasAnnotations = annotations.isNotEmpty()
+    private val annSamplesPerRecord: Int  // Ns: file space per record = 2*Ns bytes
+    private val numSignals: Int = if (hasAnnotations) 2 else 1
+    private val headerSize: Int = 256 + numSignals * 256
     private var dataRecordCount = 0
 
     init {
-        // Pre-compute TAL for each second that has annotations.
-        // TAL format: +<onset 21 chars>\x14<duration 21 chars>\x14<text>\x14\x00
-        val talBySecond = annotations.mapValues { (_, text) ->
-            "+0.0".padEnd(21, ' ') + "\u0014" + "".padEnd(21, ' ') + "\u0014$text\u0014\u0000"
-        }
-        // Max annotation bytes across all records (round up to 4-byte boundary)
-        annBytesPerRecord = (talBySecond.values.maxOfOrNull { it.length } ?: 0).let {
-            (it + 3) / 4 * 4
-        }
-        numSignals = 1 + if (annBytesPerRecord > 0) 1 else 0
-        headerSize = 256 + numSignals * 256
+        annSamplesPerRecord = if (hasAnnotations) {
+            val maxUserTalBytes = annotations.entries.maxOf { (recordIdx, text) ->
+                userTal(recordIdx, text).toByteArray(Charsets.UTF_8).size
+            }
+            // Each record carries timekeeping + (optional) user TAL + zero padding
+            val totalMaxBytes = TIMEKEEPING_MAX_BYTES + maxUserTalBytes
+            (totalMaxBytes + 1) / 2  // round up to int16 boundary
+        } else 0
     }
+
+    private fun timeKeepingTal(recordIdx: Int): String =
+        "+$recordIdx\u0014\u0014\u0000"
+
+    private fun userTal(recordIdx: Int, text: String): String =
+        "+$recordIdx\u0014$text\u0014\u0000"
 
     fun writeHeader(totalSeconds: Int) {
         val sb = StringBuilder()
@@ -57,7 +70,8 @@ class EdfWriter(
         sb.append(SimpleDateFormat("dd.MM.yy", Locale.US).format(startTime).let { edfStr(it, 8) })
         sb.append(SimpleDateFormat("HH.mm.ss", Locale.US).format(startTime).let { edfStr(it, 8) })
         sb.append(edfStr(headerSize.toString(), 8))                 // header bytes
-        sb.append(edfStr("", 44))                                   // reserved
+        // EDF+ continuous marker in reserved field (per spec section 2.1)
+        sb.append(edfStr(if (hasAnnotations) "EDF+C" else "", 44))
         sb.append(edfStr(totalSeconds.toString(), 8))               // num data records
         sb.append(edfStr("1", 8))                                   // data record duration (seconds)
         sb.append(edfStr(numSignals.toString(), 4))                 // number of signals
@@ -75,7 +89,7 @@ class EdfWriter(
         sb.append(edfStr("", 32))
 
         // --- Signal 2: EDF Annotations (256 bytes, optional) ---
-        if (numSignals > 1) {
+        if (hasAnnotations) {
             sb.append(edfStr("EDF Annotations", 16))
             sb.append(edfStr("", 80))                                // transducer
             sb.append(edfStr("", 8))                                 // physical dimension
@@ -84,36 +98,45 @@ class EdfWriter(
             sb.append(edfStr("-32768", 8))                           // digital min
             sb.append(edfStr("32767", 8))                            // digital max
             sb.append(edfStr("", 80))                                // prefiltering
-            sb.append(edfStr(annBytesPerRecord.toString(), 8))       // samples per data record
+            sb.append(edfStr(annSamplesPerRecord.toString(), 8))     // samples per data record
             sb.append(edfStr("", 32))
         }
 
         val header = sb.toString()
-        assert(header.length == headerSize) { "EDF header size mismatch: ${header.length} (expected $headerSize)" }
+        check(header.length == headerSize) {
+            "EDF header size mismatch: ${header.length} (expected $headerSize)"
+        }
         output.write(header.toByteArray(Charsets.US_ASCII))
     }
 
     /**
-     * Write one data record (1 second).
-     * [annotation] — TAL string for this record, or empty if no note.
+     * Write one data record (1 second). The annotation block is built from the
+     * `annotations` map passed at construction; record index is tracked internally.
      */
-    fun writeDataRecord(samples: IntArray, annotation: String = "") {
-        val ecgSize = samples.size * 2
-        val annSize = annBytesPerRecord * 2  // each byte → 1 s16 sample
-        val buf = ByteBuffer.allocate(ecgSize + annSize).order(ByteOrder.LITTLE_ENDIAN)
+    fun writeDataRecord(samples: IntArray) {
+        val ecgBytes = samples.size * 2
+        val annBytes = annSamplesPerRecord * 2
+        val buf = ByteBuffer.allocate(ecgBytes + annBytes).order(ByteOrder.LITTLE_ENDIAN)
 
-        // ECG samples
+        // ECG samples (int16 LE)
         for (s in samples) {
             buf.putShort(s.coerceIn(DIGITAL_MIN, DIGITAL_MAX).toShort())
         }
 
-        // Annotation bytes (if second signal exists)
-        if (numSignals > 1) {
-            val annBytes = annotation.toByteArray(Charsets.UTF_8)
-            for (i in 0 until annBytesPerRecord) {
-                val b = if (i < annBytes.size) annBytes[i].toInt() and 0xFF else 0
-                buf.putShort(b.toShort())
+        // EDF Annotations channel: TAL bytes packed directly into 2*Ns byte block.
+        // Required by EDF+: every record starts with a time-keeping TAL.
+        if (hasAnnotations) {
+            val timeKeeping = timeKeepingTal(dataRecordCount)
+            val userPart = annotations[dataRecordCount]
+                ?.let { userTal(dataRecordCount, it) }
+                ?: ""
+            val talBytes = (timeKeeping + userPart).toByteArray(Charsets.UTF_8)
+            check(talBytes.size <= annBytes) {
+                "TAL overflow at record $dataRecordCount: ${talBytes.size} > $annBytes"
             }
+            buf.put(talBytes)
+            // Zero-pad remaining bytes
+            repeat(annBytes - talBytes.size) { buf.put(0.toByte()) }
         }
 
         output.write(buf.array())
