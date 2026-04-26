@@ -52,6 +52,48 @@ export ANDROID_HOME="$SDK_HOME"
 export ANDROID_SDK_ROOT="$SDK_HOME"
 export PATH="$SDK_TOOLS_DIR:$SDK_PLATFORM_TOOLS_DIR:$SDK_EMULATOR_DIR:$PATH"
 
+# ---- Java detection --------------------------------------------------------
+#
+# sdkmanager / avdmanager from recent commandline-tools (build 11076708+)
+# are compiled for Java 17. If the user's default `java` is older (typical
+# on Arch where the system default stays at 11 for compatibility), `yes |
+# sdkmanager --licenses` blows up with UnsupportedClassVersionError before
+# any package can be installed. Pick the newest JDK >= 17 we can find and
+# wire JAVA_HOME / PATH so every Android tool below sees that JVM.
+
+find_java17_home() {
+    # Honor an explicit caller override first.
+    if [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+        local v
+        v="$("$JAVA_HOME/bin/java" -version 2>&1 | head -1)"
+        case "$v" in *\"1[7-9].*|*\"[2-9][0-9].*) echo "$JAVA_HOME"; return 0 ;; esac
+    fi
+    # Common Linux layouts.
+    for candidate in \
+        /usr/lib/jvm/java-17-openjdk \
+        /usr/lib/jvm/java-21-openjdk \
+        /usr/lib/jvm/java-25-openjdk \
+        /usr/lib/jvm/jdk-17 \
+        /usr/lib/jvm/jdk-21 \
+        /opt/openjdk-17 \
+        /opt/openjdk-21 \
+        ; do
+        [ -x "$candidate/bin/java" ] && { echo "$candidate"; return 0; }
+    done
+    # macOS layout.
+    if command -v /usr/libexec/java_home > /dev/null 2>&1; then
+        local mh
+        mh="$(/usr/libexec/java_home -v 17+ 2>/dev/null || true)"
+        [ -n "$mh" ] && [ -x "$mh/bin/java" ] && { echo "$mh"; return 0; }
+    fi
+    return 1
+}
+
+if jh="$(find_java17_home)"; then
+    export JAVA_HOME="$jh"
+    export PATH="$JAVA_HOME/bin:$PATH"
+fi
+
 # ---- Pretty-print helpers --------------------------------------------------
 
 c_red()    { printf "\033[31m%s\033[0m" "$*"; }
@@ -88,6 +130,13 @@ cmd_setup() {
     require_cmd curl    "downloading commandline-tools"
     require_kvm
 
+    if [ -z "${JAVA_HOME:-}" ] || [ ! -x "${JAVA_HOME}/bin/java" ]; then
+        fail "No Java 17+ found on this host. sdkmanager from cmdline-tools \
+build $CMDLINE_TOOLS_BUILD requires JDK 17. Install with your package \
+manager (e.g. 'sudo pacman -S jdk17-openjdk' on Arch) and rerun."
+    fi
+    log "Using JAVA_HOME=$JAVA_HOME"
+
     mkdir -p "$SDK_HOME"
 
     if [ ! -x "$SDK_TOOLS_DIR/sdkmanager" ]; then
@@ -108,7 +157,11 @@ cmd_setup() {
     fi
 
     log "Accepting SDK licenses (auto-yes)…"
-    yes 2>/dev/null | "$SDK_TOOLS_DIR/sdkmanager" --licenses > /dev/null
+    # Cannot use `yes |` here: sdkmanager closes stdin after the last
+    # license, `yes` then hits SIGPIPE → exit 141, and pipefail kills
+    # the whole script silently before the install step can run. A
+    # bounded printf gives us "y\n" exactly N times and exits 0.
+    printf 'y\n%.0s' $(seq 50) | "$SDK_TOOLS_DIR/sdkmanager" --licenses > /dev/null
 
     log "Installing platform-tools, emulator, platform $API_LEVEL, system-image $ABI…"
     "$SDK_TOOLS_DIR/sdkmanager" \
