@@ -169,11 +169,15 @@ class HolterService : Service(), DeviceManager.Listener {
         if (!isRecording) return
         isRecording = false
 
+        // Capture for async cleanup, then nullify so re-connect works
+        val dm = deviceManager
+        deviceManager = null
+
         // Stop streaming off main thread
         serviceScope.launch {
-            deviceManager?.stopStreaming()
+            dm?.stopStreaming()
             delay(100)
-            deviceManager?.disconnect()
+            dm?.disconnect()
         }
 
         // Flush remaining samples
