@@ -55,11 +55,12 @@ class ConnectorService : Service() {
 
     // --- Pairing / session crypto state (per TCP session) ---
     // Pairing protocol (matches snapecg-connector/protocol.py):
-    //   - Fresh pair: phone generates a 6-digit code (logged as
-    //     PAIRING_CODE=NNNNNN), PC sends `pair` with proof = HMAC-SHA256(
-    //     code, salt). On match we derive sessionKey via PBKDF2 and persist
-    //     it (encrypted, see PairingStore) so a quick reconnect skips
-    //     re-entering the code.
+    //   - Fresh pair: phone generates a 16-char high-entropy code, shows
+    //     it on a high-priority notification (NEVER logged to logcat —
+    //     that would leak it to anyone with adb access). PC sends `pair`
+    //     with proof = HMAC-SHA256(code, salt). On match we derive
+    //     sessionKey via PBKDF2 and persist it (encrypted, see
+    //     PairingStore) so a quick reconnect skips re-entering the code.
     //   - Resume: if a key was saved for this peer within MAX_AGE_MS, PC
     //     sends `resume` with proof = HMAC-SHA256(savedKey, salt). On
     //     match we restore sessionKey and skip the code prompt.
@@ -315,9 +316,12 @@ class ConnectorService : Service() {
         pendingPairCode = code
         paired = false
         sessionKey = null
-        // adb logcat shows the code unformatted (no hyphens) so a paste
-        // straight into the connector works after stripping whitespace.
-        Log.i(TAG, "PAIRING_CODE=$code  (enter on PC connector)")
+        // The pairing code is sensitive — surfacing it via Log.i would leak
+        // it to logcat (world-readable on rooted/dev-mode devices and
+        // capturable via adb by anyone with transient USB access). Show
+        // the code only in the high-priority notification (which is gated
+        // by the device's lock screen).
+        Log.i(TAG, "Pairing initiated for $peerAddress (code shown in notification)")
         // Heads-up to the PC: a saved key may exist; resume is worth trying first.
         if (pairingStore.loadIfFresh(peerAddress) != null) {
             Log.i(TAG, "Saved pairing exists for $peerAddress; PC may attempt resume")
@@ -408,9 +412,9 @@ class ConnectorService : Service() {
     // --- Pairing notification ---
     //
     // The pairing code is a per-session secret the user must read off the
-    // phone and type into the PC connector. Without UI it lived only in
-    // adb logcat, which is invisible to a normal user. A high-importance
-    // notification surfaces it without requiring the app to be foregrounded.
+    // phone and type into the PC connector. The notification is the ONLY
+    // place it appears — never logged to logcat, since logcat is reachable
+    // by anyone with developer mode + adb on the device.
 
     private fun createPairingNotificationChannel() {
         val channel = NotificationChannel(
