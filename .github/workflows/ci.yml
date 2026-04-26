@@ -56,49 +56,19 @@ jobs:
           # at the time of writing), and AGP 8.2.0 requires Gradle 8.x —
           # mixing them blows up the build with "Unsupported Gradle version"
           # or worse, manifest-merger crashes.
-          ./gradlew testDebugUnitTest lintDebug --no-daemon
+          set -o pipefail
+          ./gradlew testDebugUnitTest lintDebug --no-daemon --stacktrace 2>&1 \
+            | tee build.log
 
-      - name: Dump lint + test failure summary
-        if: failure()
-        working-directory: snapecg-holter
-        run: |
-          {
-            echo "## Lint failure summary"
-            echo
-            echo '```'
-            test -f app/build/reports/lint-results-debug.txt \
-              && head -120 app/build/reports/lint-results-debug.txt \
-              || echo "no lint .txt report at app/build/reports/lint-results-debug.txt"
-            echo '```'
-            echo
-            echo "## Test failure summary"
-            echo
-            echo '```'
-            failed_xmls=$(find app/build/test-results -name '*.xml' 2>/dev/null \
-              | xargs grep -l "<failure\|<error" 2>/dev/null)
-            if [ -z "$failed_xmls" ]; then
-              echo "no failing test XML found under app/build/test-results"
-            else
-              echo "$failed_xmls" | head -10
-              echo
-              echo "$failed_xmls" | head -3 | xargs -I {} sh -c 'echo "--- {} ---"; cat {}' \
-                | head -200
-            fi
-            echo '```'
-            echo
-            echo "## ls of build/reports"
-            echo
-            echo '```'
-            ls -la app/build/reports/ 2>/dev/null || echo "(no app/build/reports/)"
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload reports on failure
+      - name: Upload build log + reports on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: kotlin-reports
-          path: snapecg-holter/app/build/
+          path: |
+            snapecg-holter/build.log
+            snapecg-holter/app/build/reports/
+            snapecg-holter/app/build/test-results/
           if-no-files-found: warn
           retention-days: 7
 
