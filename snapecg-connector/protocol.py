@@ -117,7 +117,7 @@ class DiscoveryListener:
         sock.bind(('', self.port))
         sock.setblocking(False)
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         end_time = time.time() + duration
 
         while time.time() < end_time:
@@ -178,7 +178,6 @@ class AppConnection:
     async def connect(self):
         """Establish TCP connection to the app."""
         self.reader, self.writer = await asyncio.open_connection(self.address, self.port)
-        await asyncio.sleep(0.5)  # let server set up DataInputStream
 
     async def disconnect(self):
         """Close connection."""

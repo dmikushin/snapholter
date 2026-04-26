@@ -349,8 +349,20 @@ class HolterConnector:
         )
         self._broadcast_task = asyncio.create_task(self._broadcast_loop())
 
-        hostname = socket.gethostname()
-        local_ip = socket.gethostbyname(hostname)
+        # Discover the real outbound-capable IP. socket.gethostbyname(
+        # gethostname()) returns 127.0.1.1 on most Linux distributions
+        # because /etc/hosts maps the hostname to a loopback alias —
+        # which would advertise the connector as unreachable.
+        # Connecting a UDP socket (no packets sent) lets the kernel
+        # pick the actual interface for routing to a public destination.
+        local_ip = "127.0.0.1"
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.connect(("8.8.8.8", 80))
+                local_ip = probe.getsockname()[0]
+        except OSError:
+            pass
+
         print(f"SnapECG Holter Connector")
         print(f"  Listening on {local_ip}:{CONNECTOR_PORT}")
         print(f"  Broadcasting presence on UDP {CONNECTOR_PORT}")
@@ -378,7 +390,7 @@ class HolterConnector:
             self._handle_app_connection, '0.0.0.0', CONNECTOR_PORT,
         )
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         reader = asyncio.StreamReader()
         await loop.connect_read_pipe(
             lambda: asyncio.StreamReaderProtocol(reader), sys.stdin)

@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.net.wifi.WifiManager
 import android.os.Binder
 import android.os.IBinder
 import android.util.Log
@@ -110,44 +111,68 @@ class ConnectorService : Service() {
         super.onDestroy()
     }
 
-    // --- Connector Discovery (port scan) ---
+    // --- Connector Discovery (UDP broadcast listener) ---
+    //
+    // The PC connector advertises itself by broadcasting a JSON announcement
+    // every 2 seconds (snapecg-connector/protocol.py: broadcast_presence).
+    // We listen passively on UDP/8365 and grab the sender IP from the first
+    // valid packet — no subnet port-scanning, no parallel TCP probes that
+    // look like nmap to corporate firewalls.
 
     private suspend fun scanForConnector() {
-        while (scope.isActive) {
-            try {
-                if (clientSocket != null && clientSocket?.isConnected == true) {
-                    // Already connected — just check it's alive
-                    delay(5000)
-                    continue
-                }
+        // Some Wi-Fi chipsets / OEMs filter broadcast packets to userspace
+        // unless an explicit lock is held. CHANGE_WIFI_MULTICAST_STATE is
+        // declared in the manifest already.
+        val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        val mcastLock = wifi?.createMulticastLock("snapecg-discovery")?.apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+        try {
+            DatagramSocket(null).use { sock ->
+                sock.reuseAddress = true
+                sock.broadcast = true
+                sock.bind(InetSocketAddress(PORT))
+                sock.soTimeout = 3000  // wake up periodically to honour cancel
 
-                val localIp = getLocalIp()
-                if (localIp == null) {
-                    Log.w(TAG, "Cannot determine local IP, retrying...")
-                    delay(5000)
-                    continue
-                }
-                val prefix = localIp.substringBeforeLast('.')
-                Log.d(TAG, "Scanning $prefix.* for connector (local=$localIp)")
-                val found = scanSubnet(prefix, localIp)
-                if (found != null) {
-                    Log.i(TAG, "Connector found at $found, connecting...")
-                    connectorAddress = found
-                    isConnectorConnected = true
-                    connectToConnector(found)
-                } else {
-                    if (isConnectorConnected) {
-                        Log.i(TAG, "Connector lost")
+                val buf = ByteArray(2048)
+                while (scope.isActive) {
+                    // While connected: don't poll the network — just wait.
+                    if (clientSocket?.isConnected == true) {
+                        delay(2000); continue
                     }
-                    isConnectorConnected = false
-                    connectorAddress = null
+
+                    val packet = DatagramPacket(buf, buf.size)
+                    try {
+                        sock.receive(packet)
+                    } catch (e: SocketTimeoutException) {
+                        continue
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Discovery socket error: ${e.message}")
+                        delay(1000); continue
+                    }
+
+                    val payload = String(packet.data, 0, packet.length, Charsets.UTF_8)
+                    val sender = packet.address.hostAddress ?: continue
+                    val type = try {
+                        JSONObject(payload).optString("type", "")
+                    } catch (_: Exception) { "" }
+                    if (type != "snapecg_connector") continue
+
+                    Log.i(TAG, "Connector announced from $sender")
+                    connectorAddress = sender
+                    isConnectorConnected = true
+                    try {
+                        connectToConnector(sender)
+                    } finally {
+                        // connection lifecycle ended — keep listening.
+                        connectorAddress = null
+                        isConnectorConnected = false
+                    }
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "Discovery error: ${e.message}")
-                isConnectorConnected = false
-                connectorAddress = null
             }
-            delay(5000)
+        } finally {
+            try { mcastLock?.release() } catch (_: Exception) {}
         }
     }
 
@@ -208,41 +233,6 @@ class ConnectorService : Service() {
             endPairingSession()
             Log.i(TAG, "Disconnected from connector")
         }
-    }
-
-    private suspend fun scanSubnet(prefix: String, localIp: String): String? {
-        val jobs = (1..254).mapNotNull { i ->
-            val ip = "$prefix.$i"
-            if (ip == localIp) return@mapNotNull null
-            scope.async {
-                try {
-                    val sock = Socket()
-                    sock.connect(InetSocketAddress(ip, PORT), 500)
-                    sock.close()
-                    ip
-                } catch (_: Exception) {
-                    null
-                }
-            }
-        }
-        val results = jobs.awaitAll()
-        return results.filterNotNull().firstOrNull()
-    }
-
-    private fun getLocalIp(): String? {
-        try {
-            for (iface in java.net.NetworkInterface.getNetworkInterfaces()) {
-                if (iface.isLoopback || !iface.isUp) continue
-                for (addr in iface.inetAddresses) {
-                    if (addr is java.net.Inet4Address && !addr.isLoopbackAddress) {
-                        return addr.hostAddress
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "getLocalIp failed: ${e.message}")
-        }
-        return null
     }
 
     // --- Request handler ---
