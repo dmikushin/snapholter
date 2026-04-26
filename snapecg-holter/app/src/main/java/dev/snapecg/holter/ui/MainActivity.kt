@@ -280,6 +280,9 @@ class MainActivity : AppCompatActivity() {
                 statusMessage.text = ""
                 primaryButton.text = "Stop Recording"
                 primaryButton.setOnClickListener { onStopRecording() }
+                secondaryButton.visibility = View.VISIBLE
+                secondaryButton.text = "Add Note"
+                secondaryButton.setOnClickListener { onAddNote() }
             }
             UiState.COMPLETED -> {
                 statusIcon.text = "\u2714\uFE0F" // done
@@ -363,6 +366,35 @@ class MainActivity : AppCompatActivity() {
                 setState(UiState.COMPLETED)
             }
         }.start()
+    }
+
+    private fun onAddNote() {
+        val input = EditText(this).apply {
+            hint = "Note (e.g. 'steep climb starting')"
+            isSingleLine = true
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Add note at ${formatElapsed()}")
+            .setView(input)
+            .setPositiveButton("Save") { _, _ ->
+                val text = input.text.toString().trim()
+                if (text.isNotEmpty()) {
+                    holterService?.addEvent(text)
+                    Toast.makeText(this, "Note saved", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun formatElapsed(): String {
+        val svc = holterService ?: return "--:--"
+        val elapsed = if (svc.startTime > 0)
+            (System.currentTimeMillis() - svc.startTime) / 1000 else 0
+        val h = elapsed / 3600
+        val m = (elapsed % 3600) / 60
+        val s = elapsed % 60
+        return String.format("%d:%02d:%02d", h, m, s)
     }
 
     private fun openRecordingsFolder() {
