@@ -40,9 +40,19 @@ class HolterService : Service(), DeviceManager.Listener {
         const val ACTION_CONNECT = "dev.snapecg.holter.CONNECT"
         const val ACTION_DISCONNECT = "dev.snapecg.holter.DISCONNECT"
         const val ACTION_ADD_EVENT = "dev.snapecg.holter.ADD_EVENT"
+        /**
+         * Stops the recording AND triggers the EDF export, all from a single
+         * intent. This exists so e2e harnesses (and anything else that wants
+         * to drive the app from the command line via `am`) doesn't have to
+         * race the UI thread between calling stopRecording() and spawning
+         * the export — the activity normally does both, but we want a path
+         * that doesn't require the UI to be foregrounded.
+         */
+        const val ACTION_STOP_AND_EXPORT = "dev.snapecg.holter.STOP_AND_EXPORT"
         const val EXTRA_ADDRESS = "address"
         const val EXTRA_EVENT_TEXT = "event_text"
         const val EXTRA_EVENT_TAG = "event_tag"
+        const val EXTRA_PATIENT_NAME = "patient_name"
     }
 
     private var deviceManager: DeviceManager? = null
@@ -132,6 +142,21 @@ class HolterService : Service(), DeviceManager.Listener {
                 startRecording(address)
             }
             ACTION_STOP -> stopRecording()
+            ACTION_STOP_AND_EXPORT -> {
+                val patient = intent.getStringExtra(EXTRA_PATIENT_NAME) ?: ""
+                // Capture the session ID before stopRecording wipes state.
+                val sid = sessionId
+                val ctx = applicationContext
+                val storeRef = store
+                stopRecording()
+                // Use a plain Thread, not serviceScope.launch — stopRecording()
+                // calls stopSelf() which cancels the scope before the export
+                // can finish. Application context survives Service destruction.
+                Thread {
+                    val name = storeRef?.exportToEdf(ctx, sid, patient)
+                    Log.i(TAG, "EDF export complete: $name (session=$sid, patient='$patient')")
+                }.start()
+            }
             ACTION_ADD_EVENT -> {
                 val text = intent.getStringExtra(EXTRA_EVENT_TEXT) ?: ""
                 val tag = intent.getStringExtra(EXTRA_EVENT_TAG) ?: "note"
@@ -299,6 +324,16 @@ class HolterService : Service(), DeviceManager.Listener {
         }
         val leadOffChanged = this.leadOff != leadOff
         this.leadOff = leadOff
+        // Lead-off transitions are clinically relevant — a sudden flip
+        // means the electrode lost contact and the next few seconds of
+        // signal are unreliable. Log at info so it shows up in bug
+        // reports without needing verbose filtering.
+        if (leadOffChanged) {
+            Log.i(TAG, if (leadOff)
+                "Lead-off ASSERTED at sample $sampleCount"
+            else
+                "Lead-off cleared at sample $sampleCount")
+        }
 
         // QRS detection — DeviceManager hands us baseline-subtracted samples
         // (Protocol.rebuildEcg subtracts ECG_BASELINE), the detector wants

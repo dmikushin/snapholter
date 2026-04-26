@@ -7,9 +7,12 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
 import android.content.Context
 import android.util.Log
+import dev.snapecg.holter.BuildConfig
 import kotlinx.coroutines.*
 import java.io.IOException
 import java.io.InputStream
+import java.io.OutputStream
+import java.net.InetSocketAddress
 import java.util.UUID
 
 /**
@@ -48,6 +51,10 @@ class DeviceManager(private val context: Context) {
     private var hasConnectedOnce = false
 
     private var socket: BluetoothSocket? = null
+    /** Set when the address is `tcp:host:port` and BuildConfig.DEBUG.
+     *  Lets us run the app against the mock B10 server inside the
+     *  emulator (no real Bluetooth stack). Always null in release builds. */
+    private var tcpSocket: java.net.Socket? = null
     private var device: BluetoothDevice? = null
     private var address: String? = null
     private val parser = StreamParser()
@@ -57,12 +64,26 @@ class DeviceManager(private val context: Context) {
     private var shouldReconnect = true
     private var disconnectedSince: Long = 0
 
+    private val currentOutput: OutputStream?
+        get() = socket?.outputStream ?: tcpSocket?.outputStream
+
     // --- Public API ---
 
     fun connect(macAddress: String) {
         address = macAddress
         shouldReconnect = true
         disconnectedSince = 0
+
+        // Debug-only: if the address is "tcp:host:port", skip the BT stack
+        // entirely and use a TCP transport instead. Used by the mock B10
+        // server during end-to-end tests on the emulator (Android emulator
+        // has no usable Bluetooth). The check is gated on BuildConfig.DEBUG
+        // so a release APK can never be tricked into talking to a non-BT
+        // peer no matter what ends up in SharedPreferences.
+        if (BuildConfig.DEBUG && parseTcpAddress(macAddress) != null) {
+            doConnect()
+            return
+        }
 
         val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         val adapter = btManager.adapter ?: run {
@@ -83,7 +104,7 @@ class DeviceManager(private val context: Context) {
 
     fun send(data: ByteArray) {
         try {
-            socket?.outputStream?.write(data)
+            currentOutput?.write(data)
         } catch (e: IOException) {
             Log.e(TAG, "Send failed: ${e.message}")
             onConnectionLost()
@@ -184,19 +205,46 @@ class DeviceManager(private val context: Context) {
         setState(State.CONNECTING)
         scope.launch {
             try {
-                val sock = tryConnect()
-                socket = sock
+                val input = openTransport()
                 disconnectedSince = 0
                 parser.reset()
                 hasConnectedOnce = true
                 setState(State.CONNECTED)
                 Log.i(TAG, "Connected to $address")
-                startReader(sock.inputStream)
+                startReader(input)
             } catch (e: Exception) {
                 Log.w(TAG, "Connect failed: ${e.message}")
                 onConnectionLost()
             }
         }
+    }
+
+    /** Open whichever transport this address resolves to (TCP shim in debug
+     *  builds for "tcp:host:port", otherwise standard RFCOMM). Sets the
+     *  matching socket field so currentOutput / closeSocket see it.
+     *  Returns the InputStream the reader loop should drain. */
+    private fun openTransport(): InputStream {
+        val tcp = if (BuildConfig.DEBUG) parseTcpAddress(address) else null
+        return if (tcp != null) {
+            val s = java.net.Socket()
+            s.connect(InetSocketAddress(tcp.first, tcp.second), 3000)
+            tcpSocket = s
+            Log.i(TAG, "Connected via TCP shim to ${tcp.first}:${tcp.second}")
+            s.inputStream
+        } else {
+            val sock = tryConnect()
+            socket = sock
+            sock.inputStream
+        }
+    }
+
+    /** Parse "tcp:host:port" → (host, port). Returns null on any other input. */
+    private fun parseTcpAddress(addr: String?): Pair<String, Int>? {
+        if (addr == null || !addr.startsWith("tcp:")) return null
+        val parts = addr.removePrefix("tcp:").split(":")
+        if (parts.size != 2) return null
+        val port = parts[1].toIntOrNull() ?: return null
+        return parts[0] to port
     }
 
     private fun onConnectionLost() {
@@ -237,14 +285,13 @@ class DeviceManager(private val context: Context) {
                 }
 
                 try {
-                    val sock = tryConnect()
-                    socket = sock
+                    val input = openTransport()
                     disconnectedSince = 0
                     parser.reset()
                     hasConnectedOnce = true
                     setState(State.CONNECTED)
                     Log.i(TAG, "Reconnected to $address")
-                    startReader(sock.inputStream)
+                    startReader(input)
                     return@launch
                 } catch (e: Exception) {
                     Log.w(TAG, "Reconnect failed: ${e.message}")
@@ -319,6 +366,8 @@ class DeviceManager(private val context: Context) {
     private fun closeSocket() {
         readerJob?.cancel()
         try { socket?.close() } catch (_: IOException) {}
+        try { tcpSocket?.close() } catch (_: IOException) {}
         socket = null
+        tcpSocket = null
     }
 }

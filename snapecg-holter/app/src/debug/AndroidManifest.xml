@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Debug-only manifest overrides. Merged into the main AndroidManifest
+    only for debug variants (release builds get exported="false" from
+    AndroidManifest.xml as usual).
+
+    Marks HolterService and ConnectorService as exported so the e2e
+    harness can drive them from the host via:
+
+        adb shell am start-foreground-service
+            -n dev.snapecg.holter/.recording.HolterService
+            -a dev.snapecg.holter.START
+            -e address tcp:10.0.2.2:9999
+
+    Without exported=true the shell UID hits "Requires permission not
+    exported from uid <app>". The override never lands in a release APK
+    because the debug source set is excluded from release builds.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          xmlns:tools="http://schemas.android.com/tools">
+    <application>
+        <service
+            android:name=".recording.HolterService"
+            android:exported="true"
+            tools:replace="android:exported" />
+
+        <service
+            android:name=".connector.ConnectorService"
+            android:exported="true"
+            tools:replace="android:exported" />
+    </application>
+</manifest>
