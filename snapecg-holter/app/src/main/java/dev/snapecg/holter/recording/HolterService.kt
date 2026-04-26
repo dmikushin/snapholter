@@ -191,8 +191,22 @@ class HolterService : Service(), DeviceManager.Listener {
     private fun startRecording(address: String) {
         if (isRecording) return
 
-        // Foreground notification
-        startForeground(NOTIFICATION_ID, buildNotification("Connecting..."))
+        // Foreground notification.
+        // API 29+ added a 3-arg startForeground that takes a
+        // foregroundServiceType bitmask. Lint at targetSdk 34 requires the
+        // explicit form for any service declared with foregroundServiceType
+        // in the manifest (we use connectedDevice — the BT chest-strap).
+        // Pre-Q (Android 9 and below) the 2-arg form is the only one that
+        // exists, so we branch on SDK_INT.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                buildNotification("Connecting..."),
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, buildNotification("Connecting..."))
+        }
 
         // Wake lock — bounded so a stuck recording can't keep the CPU
         // pinned forever. 25 hours covers the longest realistic Holter
