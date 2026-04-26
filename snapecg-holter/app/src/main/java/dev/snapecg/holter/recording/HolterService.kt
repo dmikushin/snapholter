@@ -229,12 +229,24 @@ class HolterService : Service(), DeviceManager.Listener {
             dm?.disconnect()
         }
 
-        // Flush remaining samples
-        flushSamples()
         flushHandler.removeCallbacks(flushRunnable)
 
-        // Close session
-        store?.closeSession(sessionId, sampleCount)
+        // Atomic final drain: capture the remaining samples and the final
+        // sampleCount under the same lock that onEcgSample uses. This is
+        // the only place where we can guarantee that the saved
+        // sample_count exactly matches the bytes we wrote to the chunks
+        // table — concurrent BT samples that already passed the
+        // isRecording check (which we just flipped to false) will block
+        // here, drop in atomically, and be picked up by this drain.
+        val toWrite: List<Int>
+        val finalCount: Long
+        synchronized(sampleBuffer) {
+            toWrite = sampleBuffer.toList()
+            sampleBuffer.clear()
+            finalCount = sampleCount
+        }
+        if (toWrite.isNotEmpty()) store?.writeSamples(sessionId, toWrite)
+        store?.closeSession(sessionId, finalCount)
 
         // Release wake lock
         wakeLock?.release()
@@ -244,7 +256,7 @@ class HolterService : Service(), DeviceManager.Listener {
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
 
-        Log.i(TAG, "Recording stopped: $sampleCount samples")
+        Log.i(TAG, "Recording stopped: $finalCount samples")
     }
 
     // --- DeviceManager.Listener ---
@@ -274,10 +286,16 @@ class HolterService : Service(), DeviceManager.Listener {
 
     override fun onEcgSample(sample: Int, leadOff: Boolean) {
         if (!isRecording) return
+        // sampleCount is incremented inside the lock alongside the buffer
+        // append so a concurrent stopRecording, which captures both under
+        // the same lock, sees a consistent (buffer, sampleCount) pair.
+        // Without this, stopRecording could pick up the appended sample but
+        // miss the counter increment, off-by-one'ing the saved sample_count
+        // for the session.
         synchronized(sampleBuffer) {
             sampleBuffer.add(sample)
+            sampleCount++
         }
-        sampleCount++
         val leadOffChanged = this.leadOff != leadOff
         this.leadOff = leadOff
 
