@@ -514,7 +514,9 @@ class ConnectorService : Service() {
         // Empty list if HolterService isn't bound or there's no recording yet.
         val samples = store?.getRecentSamples(/* sessionId */ -1, n) ?: emptyList()
         val arr = JSONArray()
-        for (s in samples) arr.put(s + 2048) // restore ADC baseline for analysis
+        // Restore ADC baseline (DeviceManager subtracted it on ingest); the
+        // AI-side analyzer expects raw ADC values centred on Protocol.ECG_BASELINE.
+        for (s in samples) arr.put(s + dev.snapecg.holter.bluetooth.Protocol.ECG_BASELINE)
         return JSONObject().put("samples", arr)
     }
 

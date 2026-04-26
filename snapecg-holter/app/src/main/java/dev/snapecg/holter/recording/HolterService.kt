@@ -7,6 +7,7 @@ import android.os.*
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import dev.snapecg.holter.bluetooth.DeviceManager
+import dev.snapecg.holter.bluetooth.Protocol
 import dev.snapecg.holter.bluetooth.QRSDetector
 import dev.snapecg.holter.ui.MainActivity
 import kotlinx.coroutines.*
@@ -299,8 +300,12 @@ class HolterService : Service(), DeviceManager.Listener {
         val leadOffChanged = this.leadOff != leadOff
         this.leadOff = leadOff
 
-        // QRS detection — sample is baseline-subtracted, restore ADC baseline
-        val hr = qrsDetector.process(sample + 2048)
+        // QRS detection — DeviceManager hands us baseline-subtracted samples
+        // (Protocol.rebuildEcg subtracts ECG_BASELINE), the detector wants
+        // raw ADC values, so we add the baseline back here. Pulled from the
+        // protocol constant rather than hard-coded so a firmware revision
+        // that changes the ADC range needs only one source-of-truth update.
+        val hr = qrsDetector.process(sample + Protocol.ECG_BASELINE)
         val hrChanged = hr > 0 && hr != lastHr
         if (hr > 0) lastHr = hr
 
