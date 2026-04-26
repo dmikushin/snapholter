@@ -16,6 +16,11 @@ import org.json.JSONObject
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.net.*
+import java.security.MessageDigest
+import javax.crypto.Mac
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.PBEKeySpec
+import javax.crypto.spec.SecretKeySpec
 
 /**
  * Service handling PC connector discovery and communication.
@@ -33,8 +38,22 @@ class ConnectorService : Service() {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var clientSocket: Socket? = null
+
+    // --- Pairing / session crypto state (per TCP session) ---
+    // Pairing protocol (matches snapecg-connector/protocol.py):
+    //   1. On every accepted TCP session we generate a fresh 6-digit code,
+    //      log it (PAIRING_CODE=NNNNNN), and require the user to type it
+    //      into the PC connector.
+    //   2. PC sends `pair` request with salt + proof = HMAC-SHA256(code, salt).
+    //   3. We verify the HMAC in constant time. On match we derive a
+    //      session key (PBKDF2-HMAC-SHA256, 100k iters, 32 bytes) which is
+    //      the same key the PC derives — used by the next commit for AES-GCM.
+    //   4. Until `paired` flips true, every non-`pair` RPC method is
+    //      rejected with `{error: "not paired"}`.
+    private var pendingPairCode: String? = null
     private var paired = false
-    private var pairingCode: String? = null
+    /** Set after successful pair; consumed by AES-GCM in a follow-up commit. */
+    var sessionKey: ByteArray? = null; private set
 
     // Observable connector state (based on port scan discovery)
     var isConnectorConnected = false; private set
@@ -148,6 +167,9 @@ class ConnectorService : Service() {
         val input = DataInputStream(socket.getInputStream())
         val output = DataOutputStream(socket.getOutputStream())
 
+        // Fresh pairing state per session — old codes don't carry over.
+        startNewPairingSession()
+
         try {
             while (scope.isActive && socket.isConnected) {
                 val length = input.readInt()
@@ -169,6 +191,8 @@ class ConnectorService : Service() {
             socket.close()
             clientSocket = null
             isConnectorConnected = false
+            // Wipe credentials on disconnect — every reconnect must re-pair.
+            endPairingSession()
             Log.i(TAG, "Disconnected from connector")
         }
     }
@@ -216,7 +240,10 @@ class ConnectorService : Service() {
         val params = request.optJSONObject("params") ?: JSONObject()
 
         val result = try {
-            when (method) {
+            // Gate: every method except `pair` requires a successful HMAC pair first.
+            if (method != "pair" && !paired) {
+                JSONObject().put("error", "not paired")
+            } else when (method) {
                 "pair" -> handlePair(params)
                 "holter.get_status" -> handleGetStatus()
                 "holter.get_signal" -> handleGetSignal(params)
@@ -240,17 +267,71 @@ class ConnectorService : Service() {
 
     // --- Pairing ---
 
-    fun generatePairingCode(): String {
-        pairingCode = (100000..999999).random().toString()
-        return pairingCode!!
+    /** Generate a fresh code, reset paired state, log code for the user. */
+    private fun startNewPairingSession() {
+        pendingPairCode = (100000..999999).random().toString()
+        paired = false
+        sessionKey = null
+        // TODO: surface code in UI/notification. For now: adb logcat -s ConnectorService
+        Log.i(TAG, "PAIRING_CODE=$pendingPairCode  (enter on PC connector)")
+    }
+
+    private fun endPairingSession() {
+        pendingPairCode = null
+        paired = false
+        sessionKey = null
     }
 
     private fun handlePair(params: JSONObject): JSONObject {
-        // Verify HMAC proof from connector
-        val proof = params.optString("proof", "")
-        // In production: verify HMAC. For MVP: auto-accept if code displayed.
+        val code = pendingPairCode
+            ?: return JSONObject().put("error", "no pairing in progress")
+        val saltHex = params.optString("salt", "")
+        val proofHex = params.optString("proof", "")
+        if (saltHex.isEmpty() || proofHex.isEmpty()) {
+            return JSONObject().put("error", "salt and proof required")
+        }
+        val salt = hexToBytes(saltHex)
+            ?: return JSONObject().put("error", "invalid salt")
+        val proof = hexToBytes(proofHex)
+            ?: return JSONObject().put("error", "invalid proof")
+
+        val expected = hmacSha256(code.toByteArray(Charsets.UTF_8), salt)
+        if (!MessageDigest.isEqual(expected, proof)) {
+            Log.w(TAG, "Pairing rejected: HMAC mismatch")
+            return JSONObject().put("error", "invalid proof")
+        }
+
+        sessionKey = pbkdf2(code, salt, iterations = 100_000, keyBytes = 32)
         paired = true
+        pendingPairCode = null  // one-shot — code can't be reused
+        Log.i(TAG, "Paired successfully (session key derived)")
         return JSONObject().put("status", "paired")
+    }
+
+    // --- Crypto helpers ---
+
+    private fun hmacSha256(key: ByteArray, data: ByteArray): ByteArray {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(key, "HmacSHA256"))
+        return mac.doFinal(data)
+    }
+
+    private fun pbkdf2(password: String, salt: ByteArray, iterations: Int, keyBytes: Int): ByteArray {
+        val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+        val spec = PBEKeySpec(password.toCharArray(), salt, iterations, keyBytes * 8)
+        return factory.generateSecret(spec).encoded
+    }
+
+    private fun hexToBytes(hex: String): ByteArray? {
+        if (hex.length % 2 != 0) return null
+        val out = ByteArray(hex.length / 2)
+        for (i in out.indices) {
+            val hi = Character.digit(hex[i * 2], 16)
+            val lo = Character.digit(hex[i * 2 + 1], 16)
+            if (hi < 0 || lo < 0) return null
+            out[i] = ((hi shl 4) or lo).toByte()
+        }
+        return out
     }
 
     // --- API handlers ---
